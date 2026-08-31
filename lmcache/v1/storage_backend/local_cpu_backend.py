@@ -18,6 +18,9 @@ from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
 from lmcache.v1.cache_controller.message import OpType
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_allocators.mixed_memory_allocator import MixedMemoryAllocator
+from lmcache.v1.memory_allocators.mooncake_memory_provider import (
+    create_mooncake_pinned_alloc_free,
+)
 from lmcache.v1.memory_allocators.paged_cpu_gpu_memory_allocator import (
     PagedCpuGpuMemoryAllocator,
 )
@@ -358,6 +361,19 @@ class LocalCPUBackend(AllocatorBackendInterface):
         config: LMCacheEngineConfig,
         metadata: Optional[LMCacheMetadata] = None,
     ) -> MemoryAllocatorInterface:
+        """Create the local CPU allocator selected by the engine configuration.
+
+        Args:
+            config: Engine configuration that selects allocator features.
+            metadata: Optional KV layout metadata required by paged allocators.
+
+        Returns:
+            The initialized local CPU memory allocator.
+
+        Raises:
+            ValueError: If the selected allocator features are incompatible.
+            RuntimeError: If the underlying pinned arena cannot be allocated.
+        """
         cpu_size = config.max_local_cpu_size
         use_hugepages = config.local_cpu_use_hugepages
 
@@ -388,6 +404,19 @@ class LocalCPUBackend(AllocatorBackendInterface):
             logger.info(
                 "LocalCPUBackend: using pinned allocation alignment=%d bytes",
                 allocator_align_bytes,
+            )
+
+        if config.enable_mooncake_nof_pool:
+            if allocator_align_bytes not in (None, 4096):
+                raise ValueError(
+                    "Mooncake NoF allocation requires local CPU alignment of 4096"
+                )
+            pinned_alloc_free = create_mooncake_pinned_alloc_free(cpu_size_bytes)
+            return MixedMemoryAllocator(
+                cpu_size_bytes,
+                numa_mapping=numa_mapping,
+                align_bytes=4096,
+                pinned_alloc_free=pinned_alloc_free,
             )
 
         if config.enable_p2p:
@@ -959,8 +988,23 @@ class LocalCPUBackend(AllocatorBackendInterface):
     def get_memory_allocator(self):
         return self.memory_allocator
 
+    def get_pinned_buffer(self) -> Optional[torch.Tensor]:
+        """Return the allocator's contiguous pinned CPU arena, if available.
+
+        Returns:
+            The backing byte tensor, or ``None`` for non-contiguous allocators.
+        """
+        get_buffer = getattr(self.memory_allocator, "get_pinned_buffer", None)
+        if callable(get_buffer):
+            buffer = get_buffer()
+        else:
+            pin_allocator = getattr(self.memory_allocator, "pin_allocator", None)
+            buffer = getattr(pin_allocator, "buffer", None)
+        return buffer if isinstance(buffer, torch.Tensor) else None
+
     def close(self) -> None:
+        """Release cached objects before closing the local CPU allocator."""
+        self.clear()
         if self.batched_msg_sender is not None:
             self.batched_msg_sender.close()
         self.memory_allocator.close()
-        self.clear()

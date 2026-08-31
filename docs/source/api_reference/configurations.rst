@@ -42,6 +42,12 @@ Basic cache settings that control the core functionality of LMCache.
    * - local_cpu_use_hugepages
      - LMCACHE_LOCAL_CPU_USE_HUGEPAGES
      - Whether to use Linux hugepages (2 MB) for CPU-pinned KV cache memory. Not compatible with P2P mode or shared memory (multiprocess). Requires pre-allocated hugepages (``sysctl vm.nr_hugepages``). Values: true/false. Default: false
+   * - enable_mooncake_nof_pool
+     - LMCACHE_ENABLE_MOONCAKE_NOF_POOL
+     - Allocate the in-process local CPU arena with Mooncake's NoF hugepage allocator. Requires a Mooncake remote backend and cannot be combined with lazy allocation, local CPU hugepages, P2P, NIXL CPU shared memory, or io_uring fixed buffers. Default: false
+   * - mooncake_nof_replica_num
+     - LMCACHE_MOONCAKE_NOF_REPLICA_NUM
+     - Positive integer number of NoF replicas requested for Mooncake writes when ``enable_mooncake_nof_pool`` is true. Values greater than one are passed unchanged. Default: 1
    * - local_disk
      - LMCACHE_LOCAL_DISK
      - Path (or comma-separated paths) to local disk cache directories. Format: ``"file:///path/to/cache"`` or ``"/path/a,/path/b"`` for multi-device I/O. See ``local_disk_path_sharding`` for how paths are assigned to GPUs.

@@ -13,6 +13,7 @@ from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.exceptions import IrrecoverableException
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.protocol import RemoteMetadata
 from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
@@ -41,6 +42,14 @@ _LEGACY_INT_KEYS = {"global_segment_size", "local_buffer_size"}
 # Keys whose values may contain credentials and must be
 # redacted when the setup dict is logged.
 _SENSITIVE_SETUP_KEYS = {"metadata_server", "master_server_address"}
+
+
+def _close_store_after_init_failure(store: Any) -> None:
+    """Best-effort close of a partially initialized Mooncake store."""
+    try:
+        store.close()
+    except Exception:
+        logger.exception("Failed to close Mooncake store after initialization error")
 
 
 def _sanitize_setup_config(
@@ -128,6 +137,7 @@ _LMCACHE_ONLY_KEYS = {
     "mooncake_transfer_timeout",
     "mooncake_storage_root_dir",
     "mooncake_prefer_local_alloc",
+    "mooncake_nof_replica_num",
 }
 
 # Legacy keys that are forwarded without prefix (for compat).
@@ -328,7 +338,7 @@ class MooncakestoreConnector(RemoteConnector):
         local_cpu_backend: LocalCPUBackend,
         lmcache_config: Optional[LMCacheEngineConfig],
         plugin_name: Optional[str] = None,
-    ):
+    ) -> None:
         # initialize base class, which includes some common attributes
         super().__init__(local_cpu_backend.config, local_cpu_backend.metadata)
 
@@ -416,9 +426,13 @@ class MooncakestoreConnector(RemoteConnector):
 
         except ValueError as e:
             logger.error("Configuration loading failed: %s", e)
+            if hasattr(self, "store"):
+                _close_store_after_init_failure(self.store)
             raise
         except Exception as exc:
             logger.error("An error occurred while loading the configuration: %s", exc)
+            if hasattr(self, "store"):
+                _close_store_after_init_failure(self.store)
             raise
 
         self.loop = loop
@@ -428,24 +442,37 @@ class MooncakestoreConnector(RemoteConnector):
         # Initialize ReplicateConfig
         self.replica_config = ReplicateConfig()
         self.replica_config.replica_num = 1
+        engine_config = lmcache_config or local_cpu_backend.config
+        nof_enabled = engine_config.enable_mooncake_nof_pool
+        nof_replica_num = engine_config.mooncake_nof_replica_num if nof_enabled else 0
+        try:
+            self.replica_config.nof_replica_num = nof_replica_num
+        except Exception as exc:
+            if nof_enabled:
+                _close_store_after_init_failure(self.store)
+                raise IrrecoverableException(
+                    "The installed Mooncake binding cannot set "
+                    "ReplicateConfig.nof_replica_num"
+                ) from exc
 
-        # Set preferred_segment based on configuration
-        if self.config.prefer_local_alloc:
-            self.replica_config.preferred_segment = self.store.get_hostname()
+        try:
+            # Set preferred_segment based on configuration
+            if self.config.prefer_local_alloc:
+                self.replica_config.preferred_segment = self.store.get_hostname()
 
-        # Register CPU buffer for zero-copy operations
-        self._register_cpu_buffer()
+            # Register CPU buffer for zero-copy operations
+            self._register_cpu_buffer(nof_enabled)
+        except Exception:
+            _close_store_after_init_failure(self.store)
+            raise
 
         logger.info("MooncakeConnector initialized successfully.")
 
-    def _register_cpu_buffer(self):
+    def _register_cpu_buffer(self, required: bool = False) -> None:
         """Register CPU buffer for zero-copy operations."""
         try:
-            allocator = self.local_cpu_backend.memory_allocator
-            if hasattr(allocator, "pin_allocator") and hasattr(
-                allocator.pin_allocator, "buffer"
-            ):
-                buffer = allocator.pin_allocator.buffer
+            buffer = self.local_cpu_backend.get_pinned_buffer()
+            if buffer is not None:
                 self.registered_buffer_ptr = buffer.data_ptr()
                 result = self.store.register_buffer(buffer.data_ptr(), buffer.numel())
                 if result == 0:
@@ -453,15 +480,28 @@ class MooncakestoreConnector(RemoteConnector):
                         f"Registered: {hex(buffer.data_ptr())}, {buffer.numel()} bytes"
                     )
                 else:
-                    logger.warning(f"Buffer registration failed: error={result}")
                     self.registered_buffer_ptr = None
+                    message = f"Buffer registration failed: error={result}"
+                    if required:
+                        raise IrrecoverableException(message)
+                    logger.warning(message)
             else:
                 self.registered_buffer_ptr = None
+                if required:
+                    raise IrrecoverableException(
+                        "Mooncake NoF requires a contiguous local CPU buffer"
+                    )
         except Exception as e:
             logger.error(f"Buffer registration error: {e}")
             self.registered_buffer_ptr = None
+            if required:
+                if isinstance(e, IrrecoverableException):
+                    raise
+                raise IrrecoverableException(
+                    "Mooncake NoF buffer registration failed"
+                ) from e
 
-    def _unregister_cpu_buffer(self):
+    def _unregister_cpu_buffer(self) -> None:
         """Unregister CPU buffer."""
         if self.registered_buffer_ptr is not None:
             result = self.store.unregister_buffer(self.registered_buffer_ptr)
@@ -783,7 +823,7 @@ class MooncakestoreConnector(RemoteConnector):
             )
             raise
 
-    async def _put_with_metadata(self, key_str: str, memory_obj: MemoryObj):
+    async def _put_with_metadata(self, key_str: str, memory_obj: MemoryObj) -> None:
         """
         Put using put_parts when metadata is stored remotely.
         This is used when save_chunk_meta=True (matches _batch_get_buffer).
@@ -802,7 +842,11 @@ class MooncakestoreConnector(RemoteConnector):
 
             await asyncio.wait_for(
                 asyncio.to_thread(
-                    self.store.put_parts, key_str, metadata_bytes, kv_bytes
+                    self.store.put_parts,
+                    key_str,
+                    metadata_bytes,
+                    kv_bytes,
+                    config=self.replica_config,
                 ),
                 timeout=self.config.transfer_timeout,
             )
@@ -811,6 +855,13 @@ class MooncakestoreConnector(RemoteConnector):
                 f"Timeout when putting key {key_str} using put_parts. "
                 "Decode instance may redo prefill."
             )
+        except TypeError as e:
+            if getattr(self.replica_config, "nof_replica_num", 0) > 0:
+                raise IrrecoverableException(
+                    "Mooncake NoF metadata stores require put_parts(..., "
+                    "config=ReplicateConfig) support"
+                ) from e
+            raise
         except Exception as e:
             logger.error(
                 f"Failed to put key {key_str} using put_parts: "

@@ -24,6 +24,17 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def _close_created_backends(
+    storage_backends: OrderedDict[str, StorageBackendInterface],
+) -> None:
+    """Close partially created backends in dependency-safe reverse order."""
+    for name, backend in reversed(storage_backends.items()):
+        try:
+            backend.close()
+        except Exception:
+            logger.exception("Failed to clean up backend %s", name)
+
+
 def is_cuda_worker(metadata: LMCacheMetadata) -> bool:
     """
     Check if the current role is worker and a GPU accelerator is available.
@@ -283,6 +294,9 @@ def CreateStorageBackends(
                     plugin_name,
                     e,
                 )
+                if config.enable_mooncake_nof_pool:
+                    _close_created_backends(storage_backends)
+                    raise
 
     # Handle legacy remote_url (deprecated but still supported)
     if config.remote_url is not None and "RemoteBackend" not in _skip:
@@ -291,13 +305,18 @@ def CreateStorageBackends(
             "remote_url is deprecated and will be removed in a future release. "
             "Please use remote_storage_plugins instead."
         )
-        remote_backend = RemoteBackend(
-            config,
-            metadata,
-            loop,
-            local_cpu_backend,
-            dst_device,
-        )
+        try:
+            remote_backend = RemoteBackend(
+                config,
+                metadata,
+                loop,
+                local_cpu_backend,
+                dst_device,
+            )
+        except Exception:
+            if config.enable_mooncake_nof_pool:
+                _close_created_backends(storage_backends)
+            raise
         backend_name = str(remote_backend)
         storage_backends[backend_name] = remote_backend
 

@@ -34,6 +34,31 @@ from lmcache.v1.config_base import (
 logger = init_logger(__name__)
 
 
+def _to_mooncake_nof_replica_num(value: Any) -> int:
+    """Parse a Mooncake NoF replica count without boolean coercion."""
+    if isinstance(value, bool) or isinstance(value, float):
+        raise ValueError("mooncake_nof_replica_num must be an integer")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped and stripped.lstrip("+-").isdigit():
+            return int(stripped)
+    raise ValueError("mooncake_nof_replica_num must be an integer")
+
+
+def _uses_mooncake_store(config: Any) -> bool:
+    """Return whether an in-process Mooncake remote backend is configured."""
+    remote_url = config.remote_url
+    if isinstance(remote_url, str) and remote_url.startswith("mooncakestore://"):
+        return True
+    plugins = config.remote_storage_plugins or []
+    return any(
+        isinstance(plugin, str) and plugin.split(".", 1)[0] == "mooncakestore"
+        for plugin in plugins
+    )
+
+
 def _to_hidden_states_retrieve_mode(value: Any) -> str:
     """Normalize hidden_states_retrieve_mode from YAML/env."""
     if value is None:
@@ -98,6 +123,16 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "type": bool,
         "default": False,
         "env_converter": _to_bool,
+    },
+    "enable_mooncake_nof_pool": {
+        "type": bool,
+        "default": False,
+        "env_converter": _to_bool,
+    },
+    "mooncake_nof_replica_num": {
+        "type": int,
+        "default": 1,
+        "env_converter": _to_mooncake_nof_replica_num,
     },
     "reserve_local_cpu_size": {"type": float, "default": 0.0, "env_converter": float},
     "local_disk": {
@@ -688,8 +723,82 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
 
 
 # Specialized methods that are unique to LMCacheEngineConfig
-def _validate_config(self):
-    """Validate configuration"""
+def _validate_config(self: Any) -> Any:
+    """Validate this configuration and return it.
+
+    Returns:
+        The validated configuration instance.
+
+    Raises:
+        ValueError: If a configuration combination is invalid.
+        AssertionError: If a required dependent setting is missing.
+    """
+
+    if not isinstance(self.mooncake_nof_replica_num, int) or isinstance(
+        self.mooncake_nof_replica_num, bool
+    ):
+        raise ValueError("mooncake_nof_replica_num must be an integer")
+    if self.mooncake_nof_replica_num < 0:
+        raise ValueError("mooncake_nof_replica_num must be >= 0")
+
+    if self.enable_mooncake_nof_pool:
+        if self.mooncake_nof_replica_num == 0:
+            raise ValueError(
+                "enable_mooncake_nof_pool requires "
+                "mooncake_nof_replica_num to be >= 1"
+            )
+        if self.max_local_cpu_size <= 0:
+            raise ValueError("enable_mooncake_nof_pool requires max_local_cpu_size > 0")
+        if self.local_cpu_use_hugepages:
+            raise ValueError(
+                "local_cpu_use_hugepages cannot be used with "
+                "enable_mooncake_nof_pool; Mooncake owns the hugepage allocation"
+            )
+        if self.enable_lazy_memory_allocator:
+            raise ValueError(
+                "enable_lazy_memory_allocator cannot be used with "
+                "enable_mooncake_nof_pool"
+            )
+        if self.enable_p2p:
+            raise ValueError("enable_p2p cannot be used with enable_mooncake_nof_pool")
+        if not _uses_mooncake_store(self):
+            raise ValueError(
+                "enable_mooncake_nof_pool requires a mooncakestore remote backend"
+            )
+
+        extra_config = self.extra_config or {}
+        if extra_config.get("enable_nixl_storage") and self.nixl_buffer_device == "cpu":
+            raise ValueError(
+                "the NIXL CPU shared pool cannot be used with "
+                "enable_mooncake_nof_pool"
+            )
+
+        io_engine = str(extra_config.get("rust_raw_block.io_engine", "") or "").lower()
+        use_uring = (
+            io_engine == "io_uring"
+            or bool(extra_config.get("rust_raw_block.use_iouring", False))
+            or bool(extra_config.get("rust_raw_block.use_uring", False))
+        )
+        if use_uring:
+            raise ValueError(
+                "io_uring fixed-buffer mode cannot be used with "
+                "enable_mooncake_nof_pool"
+            )
+
+        explicit_align = extra_config.get("local_cpu.pinned_align_bytes")
+        if explicit_align is not None:
+            try:
+                align_bytes = int(explicit_align)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "extra_config['local_cpu.pinned_align_bytes'] must be 4096 "
+                    "when enable_mooncake_nof_pool is enabled"
+                ) from exc
+            if align_bytes != 4096:
+                raise ValueError(
+                    "extra_config['local_cpu.pinned_align_bytes'] must be 4096 "
+                    "when enable_mooncake_nof_pool is enabled"
+                )
 
     # needed for the old async serializer implementation
     # # auto-adjust save_unfull_chunk for async loading to prevent CPU fragmentation
@@ -843,7 +952,7 @@ def _validate_config(self):
         # downstream readers see a single source of truth.
         if "nixl_use_hugepages" in self.extra_config:
             nixl_huge = bool(self.extra_config["nixl_use_hugepages"])
-            user_set = getattr(self, "_user_set_keys", set())
+            user_set: set[str] = getattr(self, "_user_set_keys", set())
             if self.nixl_buffer_device == "cpu":
                 if (
                     "local_cpu_use_hugepages" in user_set

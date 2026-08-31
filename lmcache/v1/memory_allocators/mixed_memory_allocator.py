@@ -281,5 +281,13 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
             return self.pin_allocator.get_paged_buffers()
         return None
 
+    def get_pinned_buffer(self) -> torch.Tensor:
+        """Return the contiguous pinned CPU arena owned by this allocator.
+
+        Returns:
+            The byte tensor that backs pinned allocations.
+        """
+        return self.buffer
+
     def __str__(self) -> str:
         return "MixedMemoryAllocator"

@@ -1237,6 +1237,10 @@ class StorageManager:
         Returns:
             True if the backend was found and closed, False
             otherwise.
+
+        Raises:
+            ValueError: If closing a NoF-backed local CPU pool would
+                invalidate a live Mooncake remote backend.
         """
         with self.manager_lock:
             backend = self.storage_backends.get(backend_name)
@@ -1246,6 +1250,18 @@ class StorageManager:
                     backend_name,
                 )
                 return False
+
+            if (
+                self.config.enable_mooncake_nof_pool
+                and backend_name == "LocalCPUBackend"
+                and any(
+                    name.startswith("RemoteBackend") for name in self.storage_backends
+                )
+            ):
+                raise ValueError(
+                    "Close the Mooncake RemoteBackend before LocalCPUBackend "
+                    "when enable_mooncake_nof_pool is enabled"
+                )
 
             try:
                 logger.info("Closing backend: %s", backend_name)
@@ -1327,11 +1343,25 @@ class StorageManager:
 
         Raises:
             KeyError: If *backend_name* does not exist.
+            ValueError: If recreating the NoF-backed local CPU pool would
+                invalidate a live Mooncake remote backend.
         """
         with self.manager_lock:
             backend = self.storage_backends.get(backend_name)
             if backend is None:
                 raise KeyError("Backend %s not found" % backend_name)
+
+            if (
+                self.config.enable_mooncake_nof_pool
+                and backend_name == "LocalCPUBackend"
+                and any(
+                    name.startswith("RemoteBackend") for name in self.storage_backends
+                )
+            ):
+                raise ValueError(
+                    "Cannot recreate LocalCPUBackend while a Mooncake "
+                    "RemoteBackend uses its NoF buffer"
+                )
 
             # --- close ---
             try:
@@ -1388,11 +1418,12 @@ class StorageManager:
         for backend in self.storage_backends.values():
             backend.cancel_request(req_id)
 
-    def close(self):
+    def close(self) -> None:
+        """Close backends in reverse dependency order and stop the manager."""
         logger.info("Closing StorageManager...")
 
         # Close all backends
-        for name, backend in self.storage_backends.items():
+        for name, backend in reversed(self.storage_backends.items()):
             try:
                 logger.info("Closing storage backend: %s", name)
                 backend.close()

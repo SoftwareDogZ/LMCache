@@ -100,6 +100,46 @@ Create your ``mooncake-config.yaml``:
       local_buffer_size: 0    # rely on LMCache local_cpu as the buffer
       mooncake_prefer_local_alloc: true  # prefer local segment if available
 
+NoF Hugepage-backed CPU Pool
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+In in-process mode, LMCache can allocate its contiguous local CPU arena with
+Mooncake's NoF hugepage allocator. The same configuration also controls how
+many NoF replicas each Mooncake store operation requests:
+
+.. code-block:: yaml
+
+    local_cpu: false
+    max_local_cpu_size: 20
+    remote_storage_plugins: ["mooncakestore"]
+    enable_mooncake_nof_pool: true
+    mooncake_nof_replica_num: 3
+
+    extra_config:
+      save_chunk_meta: false
+      mooncake_local_hostname: "node01"
+      mooncake_metadata_server: "http://localhost:8080/metadata"
+      mooncake_master_server_address: "localhost:50051"
+      mooncake_protocol: "rdma"
+      mooncake_local_buffer_size: 0
+
+``mooncake_nof_replica_num`` accepts any positive integer; it is not a Boolean
+setting and values greater than one are passed unchanged to Mooncake's
+``ReplicateConfig``. When ``enable_mooncake_nof_pool`` is false, the effective
+NoF replica count is zero and the configured count is ignored.
+
+Mooncake must be built with NoF support and expose ``get_alloc_func_addr`` and
+``get_free_func_addr`` from ``mooncake.store``. Its Python ``put_parts`` API
+must also accept ``config=ReplicateConfig`` when ``save_chunk_meta`` is true.
+Buffer registration failure is fatal in NoF mode so LMCache never continues
+with an arena that the transfer layer cannot access.
+
+The NoF pool cannot be combined with the lazy allocator,
+``local_cpu_use_hugepages``, P2P, the NIXL CPU shared pool, or io_uring fixed
+buffers. An explicit ``local_cpu.pinned_align_bytes`` must be ``4096``. Close
+and recreate the Mooncake remote backend before replacing the local CPU
+backend, because the remote backend holds a registration for that arena.
+
 **Step 3: Start vLLM with Mooncake**
 
 .. code-block:: bash
@@ -175,6 +215,12 @@ Configuration
    * - ``max_local_cpu_size``
      - Required
      - Maximum local CPU cache size in GB (required even when local_cpu is False)
+   * - ``enable_mooncake_nof_pool``
+     - False
+     - Allocate the contiguous local CPU arena through Mooncake's NoF hugepage allocator.
+   * - ``mooncake_nof_replica_num``
+     - 1
+     - Positive integer number of NoF replicas requested for every Mooncake store operation when the NoF pool is enabled.
    * - ``numa_mode``
      - "auto"
      - NUMA binding mode. "auto" is recommended on multi‑NIC/multi‑NUMA systems to reduce tail latency.
