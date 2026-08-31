@@ -391,6 +391,13 @@ def run_cache_server(
                 )
                 mem_cfg.shm_name = ""
 
+    mem_cfg = storage_manager_config.l1_manager_config.memory_config
+    if mem_cfg.enable_mooncake_nof_pool and mem_cfg.shm_name:
+        raise ValueError(
+            "enable_mooncake_nof_pool cannot be used with POSIX SHM. "
+            'Set --shm-name "" or use --supported-transfer-mode lmcache_driven.'
+        )
+
     # blend engine: full per-chunk SWA KV (blended chunks reuse at arbitrary
     # positions). full_sw_kv widens attention groups only; recurrent groups
     # keep their one-block restore window, so a blend server also serves

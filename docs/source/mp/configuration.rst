@@ -266,6 +266,16 @@ Source: ``lmcache/v1/distributed/config.py``
    * - ``--l1-align-bytes``
      - ``4096``
      - Alignment size in bytes (default 4 KB).
+   * - ``--enable-mooncake-nof-pool``
+     - ``False``
+     - Allocate the eager L1 arena with Mooncake's NoF hugepage allocator.
+       This requires ``--no-l1-use-lazy`` and cannot be combined with POSIX
+       SHM, Device-DAX, or GDS L1.
+   * - ``--mooncake-nof-replica-num``
+     - ``1``
+     - Number of NoF replicas requested by Mooncake store operations when
+       ``--enable-mooncake-nof-pool`` is set. The value must be at least 1
+       while the pool is enabled; otherwise the effective value is 0.
    * - ``--l1-devdax-path``
      - *(not set)*
      - Optional ``/dev/dax*`` device or mmap-able file to use as the L1

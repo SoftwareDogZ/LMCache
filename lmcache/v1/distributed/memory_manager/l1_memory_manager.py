@@ -12,6 +12,9 @@ from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L1MemoryDesc
 from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_allocators.mixed_memory_allocator import MixedMemoryAllocator
+from lmcache.v1.memory_allocators.mooncake_memory_provider import (
+    create_mooncake_pinned_alloc_free,
+)
 from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
     MemoryObj,
@@ -82,9 +85,13 @@ def create_memory_allocator(config: L1MemoryManagerConfig) -> MemoryAllocatorInt
                 align_bytes=config.align_bytes,
                 shm_name=shm_name,
             )
+        pinned_alloc_free = None
+        if config.enable_mooncake_nof_pool:
+            pinned_alloc_free = create_mooncake_pinned_alloc_free(config.size_in_bytes)
         return MixedMemoryAllocator(
             config.size_in_bytes,
             align_bytes=config.align_bytes,
+            pinned_alloc_free=pinned_alloc_free,
         )
 
 
@@ -102,6 +109,9 @@ class L1MemoryManager:
         self._allocator = create_memory_allocator(config)
         self._size_in_bytes = config.size_in_bytes
         self._align_bytes = config.align_bytes
+        self._mooncake_nof_replica_num = (
+            config.mooncake_nof_replica_num if config.enable_mooncake_nof_pool else 0
+        )
 
     def allocate(
         self, layout_desc: MemoryLayoutDesc, count: int
@@ -214,6 +224,7 @@ class L1MemoryManager:
             ptr=buffer.data_ptr(),
             size=self._size_in_bytes,
             align_bytes=self._align_bytes,
+            mooncake_nof_replica_num=self._mooncake_nof_replica_num,
         )
 
     def close(self) -> None:

@@ -549,15 +549,13 @@ def _allocate_cpu_memory(
     numa_mapping: Optional[NUMAMapping] = None,
     shm_name: Optional[str] = None,
     use_hugepages: bool = False,
+    pinned_alloc_free: PinnedAllocFree | None = None,
 ) -> torch.Tensor:
     if size == 0:
         return torch.empty(0, dtype=torch.uint8)
 
-    resolved = _resolve_pinned_alloc_free(
-        numa_mapping,
-        shm_name,
-        size,
-        use_hugepages,
+    resolved = pinned_alloc_free or _resolve_pinned_alloc_free(
+        numa_mapping, shm_name, size, use_hugepages
     )
 
     try:
@@ -601,15 +599,13 @@ def _free_cpu_memory(
     numa_mapping: Optional[NUMAMapping] = None,
     shm_name: Optional[str] = None,
     use_hugepages: bool = False,
+    pinned_alloc_free: PinnedAllocFree | None = None,
 ) -> None:
     if torch_dev.is_available():
         torch_dev.synchronize()
 
-    resolved = _resolve_pinned_alloc_free(
-        numa_mapping,
-        shm_name,
-        size,
-        use_hugepages,
+    resolved = pinned_alloc_free or _resolve_pinned_alloc_free(
+        numa_mapping, shm_name, size, use_hugepages
     )
     resolved.free(buffer.data_ptr())
 

@@ -21,6 +21,8 @@ class L1MemoryDesc:
     ptr: int
     size: int
     align_bytes: int
+    mooncake_nof_replica_num: int = 0
+    """Effective NoF replica count for Mooncake writes from this L1 arena."""
 
 
 @dataclass(frozen=True)

@@ -194,18 +194,24 @@ def _create_mooncake_store_l2_adapter(
             l1_registration.base = l1_memory_desc.ptr
             l1_registration.size = l1_memory_desc.size
 
+    nof_replica_num = (
+        l1_memory_desc.mooncake_nof_replica_num if l1_memory_desc is not None else 0
+    )
     native_client = LMCacheMooncakeClient(
         config=config.setup_config,
         num_workers=config.num_workers,
         l1_registration=l1_registration,
+        nof_replica_num=nof_replica_num,
         per_op_workers=config.per_op_workers,
     )
     logger.info(
         "Created Mooncake Store L2 adapter "
-        "(workers=%d, per_op_workers=%s, preregister_l1_memory=%s)",
+        "(workers=%d, per_op_workers=%s, preregister_l1_memory=%s, "
+        "nof_replica_num=%d)",
         config.num_workers,
         config.per_op_workers,
         l1_registration.enabled and l1_registration.size > 0,
+        nof_replica_num,
     )
     return NativeConnectorL2Adapter(native_client)
 

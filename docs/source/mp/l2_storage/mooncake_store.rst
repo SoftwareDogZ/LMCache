@@ -99,6 +99,33 @@ for available setup keys (e.g., ``local_hostname``,
 For full Mooncake setup instructions (master service, metadata server,
 etc.), see `Mooncake <https://github.com/kvcache-ai/Mooncake>`_ .
 
+**NoF hugepage-backed L1:**
+
+LMCache can allocate the complete eager L1 arena with Mooncake's NoF
+hugepage allocator and request a configurable number of NoF replicas:
+
+.. code-block:: bash
+
+    lmcache server \
+      --l1-size-gb 100 \
+      --no-l1-use-lazy \
+      --enable-mooncake-nof-pool \
+      --mooncake-nof-replica-num 3 \
+      --eviction-policy LRU \
+      --l2-adapter '{
+        "type": "mooncake_store",
+        "local_hostname": "node01",
+        "metadata_server": "http://localhost:8080/metadata",
+        "master_server_addr": "localhost:50051",
+        "protocol": "rdma"
+      }'
+
+``--mooncake-nof-replica-num`` is passed to ``ReplicateConfig`` for both
+single and batch stores. The normal memory replica count remains 1. Mooncake
+must be built with NoF support and expose ``get_alloc_func_addr`` and
+``get_free_func_addr`` through ``mooncake.store``. POSIX SHM, Device-DAX, GDS
+L1, and lazy L1 allocation cannot be combined with the NoF pool.
+
 **RDMA notes:**
 
 - ``protocol: "rdma"`` requires a valid LMCache L1 memory descriptor.

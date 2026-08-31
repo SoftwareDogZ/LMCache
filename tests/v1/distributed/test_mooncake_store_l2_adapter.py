@@ -398,11 +398,13 @@ class TestMooncakeStoreL1RegistrationFactory:
                 num_workers: int,
                 l1_registration,
                 per_op_workers=None,
+                nof_replica_num: int = 0,
             ):
                 captured["config"] = config
                 captured["num_workers"] = num_workers
                 captured["l1_registration"] = l1_registration
                 captured["per_op_workers"] = per_op_workers
+                captured["nof_replica_num"] = nof_replica_num
 
         _install_fake_mooncake_extension(monkeypatch, FakeClient)
         monkeypatch.setattr(
@@ -435,6 +437,7 @@ class TestMooncakeStoreL1RegistrationFactory:
         assert registration.enabled is False
         assert registration.base == 0
         assert registration.size == 0
+        assert captured["nof_replica_num"] == 0
 
     def test_factory_passes_enabled_l1_registration_for_rdma(
         self, monkeypatch: pytest.MonkeyPatch
@@ -451,11 +454,13 @@ class TestMooncakeStoreL1RegistrationFactory:
                 num_workers: int,
                 l1_registration,
                 per_op_workers=None,
+                nof_replica_num: int = 0,
             ):
                 captured["config"] = config
                 captured["num_workers"] = num_workers
                 captured["l1_registration"] = l1_registration
                 captured["per_op_workers"] = per_op_workers
+                captured["nof_replica_num"] = nof_replica_num
 
         _install_fake_mooncake_extension(monkeypatch, FakeClient)
         monkeypatch.setattr(
@@ -473,7 +478,12 @@ class TestMooncakeStoreL1RegistrationFactory:
                 "protocol": "rdma",
             }
         )
-        l1_desc = L1MemoryDesc(ptr=123456, size=65536, align_bytes=4096)
+        l1_desc = L1MemoryDesc(
+            ptr=123456,
+            size=65536,
+            align_bytes=4096,
+            mooncake_nof_replica_num=3,
+        )
 
         adapter = mooncake_store_module._create_mooncake_store_l2_adapter(
             config,
@@ -488,6 +498,7 @@ class TestMooncakeStoreL1RegistrationFactory:
         assert registration.enabled is True
         assert registration.base == l1_desc.ptr
         assert registration.size == l1_desc.size
+        assert captured["nof_replica_num"] == 3
 
     def test_factory_passes_per_op_worker_counts(self, monkeypatch: pytest.MonkeyPatch):
         # First Party
@@ -502,11 +513,13 @@ class TestMooncakeStoreL1RegistrationFactory:
                 num_workers: int,
                 l1_registration,
                 per_op_workers=None,
+                nof_replica_num: int = 0,
             ):
                 captured["config"] = config
                 captured["num_workers"] = num_workers
                 captured["l1_registration"] = l1_registration
                 captured["per_op_workers"] = per_op_workers
+                captured["nof_replica_num"] = nof_replica_num
 
         _install_fake_mooncake_extension(monkeypatch, FakeClient)
         monkeypatch.setattr(
@@ -536,6 +549,7 @@ class TestMooncakeStoreL1RegistrationFactory:
         assert captured["config"] == config.setup_config
         assert captured["num_workers"] == 16
         assert captured["per_op_workers"] == {"lookup": 4, "retrieve": 16, "store": 4}
+        assert captured["nof_replica_num"] == 0
 
     def test_factory_requires_l1_memory_descriptor_for_rdma(
         self, monkeypatch: pytest.MonkeyPatch

@@ -129,8 +129,41 @@ class L1MemoryManagerConfig:
     devdax_size_in_bytes: int = 0
     """ Optional Device-DAX overflow size for hybrid DRAM + DAX L1. """
 
+    enable_mooncake_nof_pool: bool = False
+    """Whether Mooncake provides the eager L1 arena from its NoF pool."""
+
+    mooncake_nof_replica_num: int = 1
+    """NoF replicas requested for each Mooncake store when the pool is enabled."""
+
     def __post_init__(self):
         self.init_size_in_bytes = min(self.init_size_in_bytes, self.size_in_bytes)
+
+        if self.mooncake_nof_replica_num < 0:
+            raise ValueError("mooncake_nof_replica_num must be >= 0")
+        if self.enable_mooncake_nof_pool and self.mooncake_nof_replica_num == 0:
+            raise ValueError(
+                "enable_mooncake_nof_pool requires "
+                "mooncake_nof_replica_num to be >= 1"
+            )
+        if self.enable_mooncake_nof_pool and self.align_bytes != 0x1000:
+            raise ValueError(
+                "enable_mooncake_nof_pool requires l1-align-bytes to be 4096"
+            )
+        if self.enable_mooncake_nof_pool and self.size_in_bytes % 0x1000 != 0:
+            raise ValueError(
+                "enable_mooncake_nof_pool requires the L1 size to be "
+                "4096-byte aligned"
+            )
+        if self.enable_mooncake_nof_pool and self.use_lazy:
+            raise ValueError(
+                "enable_mooncake_nof_pool requires lazy allocation to be "
+                "disabled. Please set --no-l1-use-lazy."
+            )
+        if self.enable_mooncake_nof_pool and self.shm_name:
+            raise ValueError(
+                "enable_mooncake_nof_pool cannot be used with POSIX SHM. "
+                'Please set --shm-name "".'
+            )
 
         if self.devdax_path is not None:
             self.devdax_path = self.devdax_path.strip()
@@ -139,6 +172,11 @@ class L1MemoryManagerConfig:
             raise ValueError("devdax_size_in_bytes must be >= 0")
         if self.devdax_size_in_bytes and not self.devdax_path:
             raise ValueError("devdax_size_in_bytes requires devdax_path")
+
+        if self.enable_mooncake_nof_pool and self.devdax_path:
+            raise ValueError(
+                "enable_mooncake_nof_pool cannot be used with l1-devdax-path"
+            )
 
         if self.devdax_path and self.use_lazy:
             raise ValueError(
@@ -359,6 +397,12 @@ def validate_storage_manager_config(config: StorageManagerConfig) -> None:
     ):
         raise ValueError("gds-l1-path cannot be used with l1-devdax-path")
 
+    if (
+        config.l1_manager_config.gds_l1_config is not None
+        and config.l1_manager_config.memory_config.enable_mooncake_nof_pool
+    ):
+        raise ValueError("gds-l1-path cannot be used with enable_mooncake_nof_pool")
+
     memory_config = config.l1_manager_config.memory_config
     if not (memory_config.devdax_path and memory_config.devdax_size_in_bytes):
         return
@@ -447,6 +491,24 @@ def add_storage_manager_args(
         type=int,
         default=4096,
         help="The alignment size in bytes. Default is 4KB (4096 bytes).",
+    )
+    memory_group.add_argument(
+        "--enable-mooncake-nof-pool",
+        action="store_true",
+        default=False,
+        help=(
+            "Allocate the eager L1 arena from Mooncake's NoF hugepage pool. "
+            "Requires --no-l1-use-lazy and disables POSIX SHM. Default False."
+        ),
+    )
+    memory_group.add_argument(
+        "--mooncake-nof-replica-num",
+        type=int,
+        default=1,
+        help=(
+            "Number of NoF replicas requested for each Mooncake store when "
+            "--enable-mooncake-nof-pool is set. Default 1."
+        ),
     )
     memory_group.add_argument(
         "--l1-devdax-path",
@@ -629,6 +691,8 @@ def parse_args_to_config(
             use_lazy=args.l1_use_lazy,
             init_size_in_bytes=int(args.l1_init_size_gb * (1 << 30)),
             align_bytes=args.l1_align_bytes,
+            enable_mooncake_nof_pool=getattr(args, "enable_mooncake_nof_pool", False),
+            mooncake_nof_replica_num=getattr(args, "mooncake_nof_replica_num", 1),
             devdax_path=args.l1_devdax_path,
         )
     else:
@@ -637,6 +701,8 @@ def parse_args_to_config(
             use_lazy=args.l1_use_lazy,
             init_size_in_bytes=int(args.l1_init_size_gb * (1 << 30)),
             align_bytes=args.l1_align_bytes,
+            enable_mooncake_nof_pool=getattr(args, "enable_mooncake_nof_pool", False),
+            mooncake_nof_replica_num=getattr(args, "mooncake_nof_replica_num", 1),
             shm_name=shm_name,
             devdax_path=args.l1_devdax_path,
         )

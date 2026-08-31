@@ -43,7 +43,8 @@ class MooncakeConnector : public ConnectorBase<WorkerMooncakeConn> {
  public:
   MooncakeConnector(ConfigDict config, int num_workers,
                     L1RegistrationConfig l1_registration = {},
-                    WorkerPoolConfig worker_pool_config = {});
+                    WorkerPoolConfig worker_pool_config = {},
+                    size_t nof_replica_num = 0);
   ~MooncakeConnector() override;
 
  protected:
@@ -84,6 +85,7 @@ class MooncakeConnector : public ConnectorBase<WorkerMooncakeConn> {
   // The original config dict (kept for diagnostics).
   ConfigDict config_;
   L1RegistrationConfig l1_registration_;
+  mooncake::ReplicateConfig replicate_config_;
   size_t preregistered_block_size_{0};
 };
 

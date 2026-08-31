@@ -33,10 +33,14 @@ void ensure_batch_result_size(const std::vector<T>& results, size_t expected,
 
 MooncakeConnector::MooncakeConnector(ConfigDict config, int num_workers,
                                      L1RegistrationConfig l1_registration,
-                                     WorkerPoolConfig worker_pool_config)
+                                     WorkerPoolConfig worker_pool_config,
+                                     size_t nof_replica_num)
     : ConnectorBase(num_workers, std::move(worker_pool_config)),
       config_(std::move(config)),
       l1_registration_(l1_registration) {
+  replicate_config_.replica_num = 1;
+  replicate_config_.nof_replica_num = nof_replica_num;
+
   // Create a RealClient via the static factory.
   client_ = mooncake::RealClient::create();
   if (!client_) {
@@ -87,7 +91,8 @@ void MooncakeConnector::do_single_set(WorkerMooncakeConn& conn,
                                       size_t len, size_t chunk_size) {
   (void)chunk_size;
   ensure_registered(buf, len);
-  int rc = conn.client->put_from(key, const_cast<void*>(buf), len);
+  int rc = conn.client->put_from(key, const_cast<void*>(buf), len,
+                                 replicate_config_);
   if (rc != 0) {
     throw std::runtime_error("Mooncake put_from failed for key: " + key);
   }
@@ -169,8 +174,8 @@ void MooncakeConnector::do_batch_set(WorkerMooncakeConn& conn,
     ensure_registered(req.buf_ptrs[i], req.buf_lens[i]);
   }
 
-  auto results =
-      conn.client->batch_put_from(req.keys, req.buf_ptrs, req.buf_lens);
+  auto results = conn.client->batch_put_from(req.keys, req.buf_ptrs,
+                                             req.buf_lens, replicate_config_);
   ensure_batch_result_size(results, req.keys.size(), "batch_put_from");
 
   for (size_t i = 0; i < results.size(); ++i) {
