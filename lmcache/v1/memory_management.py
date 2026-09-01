@@ -5,7 +5,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from enum import Enum, auto
 from functools import wraps
-from typing import Any, List, Optional, Tuple, Union
+from typing import Any, Callable, List, Optional, Tuple, Union
 import abc
 import ctypes
 import os
@@ -26,6 +26,23 @@ from lmcache.v1.system_detection import NUMAMapping
 import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
+
+
+@dataclass(frozen=True)
+class PinnedAllocFree:
+    """Resolved callbacks used to allocate and free one pinned-memory arena.
+
+    Attributes:
+        alloc_fn: Callable returning the base address of the arena.
+        alloc_args: Positional arguments passed to ``alloc_fn``.
+        free_fn: Callable releasing an arena base address.
+        free_args: Positional arguments passed after the address to ``free_fn``.
+    """
+
+    alloc_fn: Callable[..., int]
+    alloc_args: tuple[Any, ...]
+    free_fn: Callable[..., None]
+    free_args: tuple[Any, ...]
 
 
 # Helper functions for thread safety
@@ -417,16 +434,20 @@ def _allocate_cpu_memory(
     size: int,
     numa_mapping: Optional[NUMAMapping] = None,
     shm_name: Optional[str] = None,
+    pinned_alloc_free: Optional[PinnedAllocFree] = None,
 ) -> torch.Tensor:
     if size == 0:
         return torch.empty(0, dtype=torch.uint8)
 
-    alloc_info, _ = _resolve_pinned_alloc_free(
-        numa_mapping,
-        shm_name,
-    )
-    alloc_fn, *alloc_args = alloc_info
-    ptr = alloc_fn(size, *alloc_args)
+    if pinned_alloc_free is not None:
+        ptr = pinned_alloc_free.alloc_fn(size, *pinned_alloc_free.alloc_args)
+    else:
+        alloc_info, _ = _resolve_pinned_alloc_free(
+            numa_mapping,
+            shm_name,
+        )
+        alloc_fn, *alloc_args = alloc_info
+        ptr = alloc_fn(size, *alloc_args)
 
     array_type = ctypes.c_uint8 * size
     buf = array_type.from_address(ptr)
@@ -440,17 +461,24 @@ def _free_cpu_memory(
     size: int | None = None,
     numa_mapping: Optional[NUMAMapping] = None,
     shm_name: Optional[str] = None,
+    pinned_alloc_free: Optional[PinnedAllocFree] = None,
 ) -> None:
     if torch_dev.is_available():
         torch_dev.synchronize()
 
-    _, free_info = _resolve_pinned_alloc_free(
-        numa_mapping,
-        shm_name,
-        size=size,
-    )
-    free_fn, *free_args = free_info
-    free_fn(buffer.data_ptr(), *free_args)
+    if pinned_alloc_free is not None:
+        pinned_alloc_free.free_fn(
+            buffer.data_ptr(),
+            *pinned_alloc_free.free_args,
+        )
+    else:
+        _, free_info = _resolve_pinned_alloc_free(
+            numa_mapping,
+            shm_name,
+            size=size,
+        )
+        free_fn, *free_args = free_info
+        free_fn(buffer.data_ptr(), *free_args)
 
 
 def _allocate_gpu_memory(
@@ -2068,6 +2096,9 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         """
 
         self.numa_mapping = kwargs.get("numa_mapping", None)
+        self.pinned_alloc_free: Optional[PinnedAllocFree] = kwargs.get(
+            "pinned_alloc_free", None
+        )
         self.align_bytes = kwargs.get("align_bytes", AddressManager.ALIGN_BYTES)
         if self.align_bytes <= 0 or self.align_bytes & (self.align_bytes - 1) != 0:
             raise ValueError("align_bytes must be a positive power of two")
@@ -2083,7 +2114,12 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
 
         self.size = size
 
-        self.buffer = _allocate_cpu_memory(size, self.numa_mapping, self.shm_name)
+        self.buffer = _allocate_cpu_memory(
+            size,
+            self.numa_mapping,
+            self.shm_name,
+            self.pinned_alloc_free,
+        )
 
         self._unregistered = False
 
@@ -2218,8 +2254,17 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
                 self.size,
                 self.numa_mapping,
                 self.shm_name,
+                self.pinned_alloc_free,
             )
             self._unregistered = True
+
+    def get_pinned_buffer(self) -> torch.Tensor:
+        """Return the contiguous pinned-memory arena owned by this allocator.
+
+        Returns:
+            The byte tensor spanning the complete pinned-memory arena.
+        """
+        return self.buffer
 
     def get_paged_buffers(self) -> Optional[list[torch.Tensor]]:
         """

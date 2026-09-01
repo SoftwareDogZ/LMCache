@@ -13,6 +13,7 @@ from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.exceptions import IrrecoverableException
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.protocol import RemoteMetadata
 from lmcache.v1.storage_backend.connector.base_connector import RemoteConnector
@@ -128,6 +129,7 @@ _LMCACHE_ONLY_KEYS = {
     "mooncake_transfer_timeout",
     "mooncake_storage_root_dir",
     "mooncake_prefer_local_alloc",
+    "mooncake_nof_replica_num",
 }
 
 # Legacy keys that are forwarded without prefix (for compat).
@@ -148,6 +150,14 @@ _SETUP_DEFAULTS: Dict[str, str] = {
     "protocol": "tcp",
     "device_name": "",
 }
+
+
+def _close_store_after_init_failure(store: Any) -> None:
+    """Best-effort close of a Mooncake store after connector setup fails."""
+    try:
+        store.close()
+    except Exception as exc:
+        logger.warning("Failed to close Mooncake store after init failure: %s", exc)
 
 
 class MooncakeStoreConfig:
@@ -373,9 +383,8 @@ class MooncakestoreConnector(RemoteConnector):
             )
 
             try:
-                numa_mapping = getattr(
-                    local_cpu_backend.memory_allocator, "numa_mapping", None
-                )
+                allocator = local_cpu_backend.get_memory_allocator()
+                numa_mapping = getattr(allocator, "numa_mapping", None)
                 if numa_mapping is None and lmcache_config is not None:
                     numa_mapping = NUMADetector.get_numa_mapping(lmcache_config)
 
@@ -428,24 +437,39 @@ class MooncakestoreConnector(RemoteConnector):
         # Initialize ReplicateConfig
         self.replica_config = ReplicateConfig()
         self.replica_config.replica_num = 1
+        engine_config = lmcache_config or local_cpu_backend.config
+        self.nof_enabled = engine_config.enable_mooncake_nof_pool
+        nof_replica_num = (
+            engine_config.mooncake_nof_replica_num if self.nof_enabled else 0
+        )
+        try:
+            self.replica_config.nof_replica_num = nof_replica_num
+        except Exception as exc:
+            if self.nof_enabled:
+                _close_store_after_init_failure(self.store)
+                raise IrrecoverableException(
+                    "The installed Mooncake binding cannot set "
+                    "ReplicateConfig.nof_replica_num"
+                ) from exc
 
-        # Set preferred_segment based on configuration
-        if self.config.prefer_local_alloc:
-            self.replica_config.preferred_segment = self.store.get_hostname()
+        try:
+            # Set preferred_segment based on configuration
+            if self.config.prefer_local_alloc:
+                self.replica_config.preferred_segment = self.store.get_hostname()
 
-        # Register CPU buffer for zero-copy operations
-        self._register_cpu_buffer()
+            # Register CPU buffer for zero-copy operations
+            self._register_cpu_buffer(required=self.nof_enabled)
+        except Exception:
+            _close_store_after_init_failure(self.store)
+            raise
 
         logger.info("MooncakeConnector initialized successfully.")
 
-    def _register_cpu_buffer(self):
+    def _register_cpu_buffer(self, required: bool = False) -> None:
         """Register CPU buffer for zero-copy operations."""
         try:
-            allocator = self.local_cpu_backend.memory_allocator
-            if hasattr(allocator, "pin_allocator") and hasattr(
-                allocator.pin_allocator, "buffer"
-            ):
-                buffer = allocator.pin_allocator.buffer
+            buffer = self.local_cpu_backend.get_pinned_buffer()
+            if buffer is not None:
                 self.registered_buffer_ptr = buffer.data_ptr()
                 result = self.store.register_buffer(buffer.data_ptr(), buffer.numel())
                 if result == 0:
@@ -453,15 +477,28 @@ class MooncakestoreConnector(RemoteConnector):
                         f"Registered: {hex(buffer.data_ptr())}, {buffer.numel()} bytes"
                     )
                 else:
-                    logger.warning(f"Buffer registration failed: error={result}")
                     self.registered_buffer_ptr = None
+                    message = f"Buffer registration failed: error={result}"
+                    if required:
+                        raise IrrecoverableException(message)
+                    logger.warning(message)
             else:
                 self.registered_buffer_ptr = None
+                if required:
+                    raise IrrecoverableException(
+                        "Mooncake NoF requires a contiguous LocalCPUBackend buffer"
+                    )
         except Exception as e:
             logger.error(f"Buffer registration error: {e}")
             self.registered_buffer_ptr = None
+            if required:
+                if isinstance(e, IrrecoverableException):
+                    raise
+                raise IrrecoverableException(
+                    "Mooncake NoF buffer registration failed"
+                ) from e
 
-    def _unregister_cpu_buffer(self):
+    def _unregister_cpu_buffer(self) -> None:
         """Unregister CPU buffer."""
         if self.registered_buffer_ptr is not None:
             result = self.store.unregister_buffer(self.registered_buffer_ptr)
@@ -800,10 +837,23 @@ class MooncakestoreConnector(RemoteConnector):
             ).serialize()
             assert len(metadata_bytes) == self.remote_metadata_bytes
 
+            if self.nof_enabled:
+                put_task = asyncio.to_thread(
+                    self.store.put_parts,
+                    key_str,
+                    metadata_bytes,
+                    kv_bytes,
+                    config=self.replica_config,
+                )
+            else:
+                put_task = asyncio.to_thread(
+                    self.store.put_parts,
+                    key_str,
+                    metadata_bytes,
+                    kv_bytes,
+                )
             await asyncio.wait_for(
-                asyncio.to_thread(
-                    self.store.put_parts, key_str, metadata_bytes, kv_bytes
-                ),
+                put_task,
                 timeout=self.config.transfer_timeout,
             )
         except asyncio.TimeoutError:
@@ -811,6 +861,13 @@ class MooncakestoreConnector(RemoteConnector):
                 f"Timeout when putting key {key_str} using put_parts. "
                 "Decode instance may redo prefill."
             )
+        except TypeError as e:
+            if self.nof_enabled:
+                raise IrrecoverableException(
+                    "Mooncake NoF metadata stores require put_parts(..., "
+                    "config=ReplicateConfig) support"
+                ) from e
+            raise
         except Exception as e:
             logger.error(
                 f"Failed to put key {key_str} using put_parts: "

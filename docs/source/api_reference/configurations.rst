@@ -34,6 +34,16 @@ Basic cache settings that control the core functionality of LMCache.
    * - max_local_cpu_size
      - LMCACHE_MAX_LOCAL_CPU_SIZE
      - Maximum CPU cache size in GB. Default: 5.0
+   * - enable_mooncake_nof_pool
+     - LMCACHE_ENABLE_MOONCAKE_NOF_POOL
+     - Allocate the in-process LocalCPUBackend arena with Mooncake's NoF
+       allocator and register it for zero-copy transfers. Requires a Mooncake
+       remote backend. Default: false
+   * - mooncake_nof_replica_num
+     - LMCACHE_MOONCAKE_NOF_REPLICA_NUM
+     - Number of NoF replicas requested for each Mooncake write when
+       ``enable_mooncake_nof_pool`` is true. Any positive integer is accepted;
+       LMCache does not impose an upper limit. Default: 1
    * - local_disk
      - LMCACHE_LOCAL_DISK
      - Path (or comma-separated paths) to local disk cache directories. Format: ``"file:///path/to/cache"`` or ``"/path/a,/path/b"`` for multi-device I/O. See ``local_disk_path_sharding`` for how paths are assigned to GPUs.

@@ -37,6 +37,21 @@ def is_cuda_worker(metadata: LMCacheMetadata) -> bool:
     return metadata.role != "scheduler" and torch_dev.is_available()
 
 
+def _close_backends_after_init_failure(
+    storage_backends: OrderedDict[str, StorageBackendInterface],
+) -> None:
+    """Close already-created backends in reverse dependency order."""
+    for backend_name, backend in reversed(storage_backends.items()):
+        try:
+            backend.close()
+        except Exception as exc:
+            logger.warning(
+                "Failed to close backend %s after initialization failure: %s",
+                backend_name,
+                exc,
+            )
+
+
 def storage_plugin_launcher(
     config: LMCacheEngineConfig,
     metadata: LMCacheMetadata,
@@ -238,10 +253,19 @@ def CreateStorageBackends(
     # Handle remote storage plugins (new way)
     if config.remote_storage_plugins and "RemoteBackend" not in _skip:
         for plugin_name in config.remote_storage_plugins:
-            assert local_cpu_backend is not None, (
-                "Remote backend requires local CPU backend as a buffer."
-                "Please turn on local cpu backend with max_local_cpu_size > 0"
-            )
+            if local_cpu_backend is None:
+                if (
+                    config.enable_mooncake_nof_pool
+                    and plugin_name.split(".", 1)[0] == "mooncakestore"
+                ):
+                    _close_backends_after_init_failure(storage_backends)
+                    raise RuntimeError(
+                        "Mooncake NoF requires LocalCPUBackend on a worker process"
+                    )
+                raise AssertionError(
+                    "Remote backend requires local CPU backend as a buffer. "
+                    "Please turn on local cpu backend with max_local_cpu_size > 0"
+                )
             try:
                 remote_backend = RemoteBackend(
                     config,
@@ -263,6 +287,12 @@ def CreateStorageBackends(
                     plugin_name,
                     e,
                 )
+                if (
+                    config.enable_mooncake_nof_pool
+                    and plugin_name.split(".", 1)[0] == "mooncakestore"
+                ):
+                    _close_backends_after_init_failure(storage_backends)
+                    raise
 
     # Handle legacy remote_url (deprecated but still supported)
     if config.remote_url is not None and "RemoteBackend" not in _skip:
@@ -271,13 +301,18 @@ def CreateStorageBackends(
             "remote_url is deprecated and will be removed in a future release. "
             "Please use remote_storage_plugins instead."
         )
-        remote_backend = RemoteBackend(
-            config,
-            metadata,
-            loop,
-            local_cpu_backend,
-            dst_device,
-        )
+        try:
+            remote_backend = RemoteBackend(
+                config,
+                metadata,
+                loop,
+                local_cpu_backend,
+                dst_device,
+            )
+        except Exception:
+            if config.enable_mooncake_nof_pool:
+                _close_backends_after_init_failure(storage_backends)
+            raise
         backend_name = str(remote_backend)
         storage_backends[backend_name] = remote_backend
 

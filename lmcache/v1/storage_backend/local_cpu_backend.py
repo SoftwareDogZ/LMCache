@@ -24,6 +24,7 @@ from lmcache.v1.memory_management import (
     PagedCpuGpuMemoryAllocator,
 )
 from lmcache.v1.metadata import LMCacheMetadata
+from lmcache.v1.mooncake_memory_provider import create_mooncake_pinned_alloc_free
 from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
 from lmcache.v1.storage_backend.batched_message_sender import BatchedMessageSender
 from lmcache.v1.storage_backend.cache_policy import get_cache_policy
@@ -378,6 +379,19 @@ class LocalCPUBackend(AllocatorBackendInterface):
             logger.info(
                 "LocalCPUBackend: using pinned allocation alignment=%d bytes",
                 allocator_align_bytes,
+            )
+
+        if config.enable_mooncake_nof_pool:
+            pinned_alloc_free = create_mooncake_pinned_alloc_free(cpu_size_bytes)
+            logger.info(
+                "LocalCPUBackend: using Mooncake NoF allocation for %d bytes",
+                cpu_size_bytes,
+            )
+            return MixedMemoryAllocator(
+                cpu_size_bytes,
+                numa_mapping=numa_mapping,
+                align_bytes=4096,
+                pinned_alloc_free=pinned_alloc_free,
             )
 
         if config.enable_p2p:
@@ -879,8 +893,19 @@ class LocalCPUBackend(AllocatorBackendInterface):
     def get_memory_allocator(self):
         return self.memory_allocator
 
+    def get_pinned_buffer(self) -> Optional[torch.Tensor]:
+        """Return the contiguous LocalCPUBackend arena when one is available.
+
+        Returns:
+            The pinned byte tensor used by the non-paged mixed allocator, or
+            ``None`` when this backend uses another allocator implementation.
+        """
+        if isinstance(self.memory_allocator, MixedMemoryAllocator):
+            return self.memory_allocator.get_pinned_buffer()
+        return None
+
     def close(self) -> None:
         if self.batched_msg_sender is not None:
             self.batched_msg_sender.close()
-        self.memory_allocator.close()
         self.clear()
+        self.memory_allocator.close()

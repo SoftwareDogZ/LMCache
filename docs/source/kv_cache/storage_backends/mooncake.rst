@@ -226,6 +226,51 @@ Configuration
      - False
      - Prefer allocating on the local segment when possible.
 
+NoF-backed in-process memory
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+LMCache can allocate the complete in-process ``LocalCPUBackend`` arena through
+Mooncake's NoF allocator. Mooncake owns the hugepage allocation, LMCache pins
+the returned range for CUDA access, and the Mooncake connector registers the
+same contiguous range for zero-copy network transfers.
+
+Build Mooncake with NoF support so that its Python binding exports
+``get_alloc_func_addr``, ``get_free_func_addr``, and
+``ReplicateConfig.nof_replica_num``. Then enable the pool in the LMCache
+configuration:
+
+.. code-block:: yaml
+
+    local_cpu: false
+    max_local_cpu_size: 20
+    remote_storage_plugins:
+      - mooncakestore
+    enable_mooncake_nof_pool: true
+    mooncake_nof_replica_num: 3
+
+    extra_config:
+      save_chunk_meta: false
+      local_hostname: "localhost"
+      metadata_server: "http://localhost:8080/metadata"
+      protocol: "rdma"
+      device_name: ""
+      global_segment_size: 21474836480
+      master_server_address: "localhost:50051"
+      local_buffer_size: 0
+
+``mooncake_nof_replica_num`` accepts any positive integer. LMCache keeps the
+normal Mooncake replica count at one and forwards the configured NoF count to
+``put_from``, ``batch_put_from``, and metadata-enabled ``put_parts`` writes.
+When ``enable_mooncake_nof_pool`` is false, the effective NoF count is zero.
+The number of replicas that can actually be created is determined by the
+Mooncake deployment; LMCache deliberately applies no upper limit.
+
+The NoF pool requires ``max_local_cpu_size`` greater than zero and cannot be
+combined with P2P allocation, lazy allocation, POSIX SHM allocation, io_uring
+fixed buffers, or a local CPU alignment other than 4096 bytes. NIXL storage in
+this LMCache version owns a separate pool and can coexist with the NoF-backed
+LocalCPUBackend, but both pools contribute to the process's memory footprint.
+
 .. important::
    **Understanding global_segment_size**: This parameter defines the amount of memory each vLLM worker contributes to the distributed memory pool. 
    The total cluster memory available for KV cache storage will be: ``number_of_vllm_workers × global_segment_size``.

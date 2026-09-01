@@ -156,6 +156,21 @@ class RemoteBackend(StorageBackendInterface):
             logger.error("Irrecoverable error during connection initialization")
             raise
         except Exception as e:
+            nof_mooncake = self.config.enable_mooncake_nof_pool and (
+                (
+                    self.plugin_name is not None
+                    and self.plugin_name.split(".", 1)[0] == "mooncakestore"
+                )
+                or (
+                    self.plugin_name is None
+                    and self.config.remote_url is not None
+                    and self.config.remote_url.split("://", 1)[0] == "mooncakestore"
+                )
+            )
+            if nof_mooncake:
+                raise IrrecoverableException(
+                    "Mooncake NoF remote connection initialization failed"
+                ) from e
             with self.lock:
                 self.failure_time = time.time()
             logger.warning(f"Failed to initialize/re-establish remote connection: {e}")

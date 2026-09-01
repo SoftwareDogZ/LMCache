@@ -55,6 +55,16 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def _has_mooncake_remote_backend(
+    storage_backends: Dict[str, StorageBackendInterface],
+) -> bool:
+    """Return whether the backend map contains a Mooncake remote backend."""
+    return any(
+        name == "RemoteBackend" or name.startswith("RemoteBackend-mooncakestore")
+        for name in storage_backends
+    )
+
+
 # Helper function to get the class name of the backend
 def get_backend_cname(backend: StorageBackendInterface) -> str:
     return backend.__class__.__name__
@@ -1183,6 +1193,17 @@ class StorageManager:
             otherwise.
         """
         with self.manager_lock:
+            if (
+                backend_name == "LocalCPUBackend"
+                and self.config.enable_mooncake_nof_pool
+                and _has_mooncake_remote_backend(self.storage_backends)
+            ):
+                logger.error(
+                    "Cannot close LocalCPUBackend while a Mooncake NoF "
+                    "RemoteBackend is active"
+                )
+                return False
+
             backend = self.storage_backends.get(backend_name)
             if backend is None:
                 logger.warning(
@@ -1273,6 +1294,16 @@ class StorageManager:
             KeyError: If *backend_name* does not exist.
         """
         with self.manager_lock:
+            if (
+                backend_name == "LocalCPUBackend"
+                and self.config.enable_mooncake_nof_pool
+                and _has_mooncake_remote_backend(self.storage_backends)
+            ):
+                raise RuntimeError(
+                    "Cannot recreate LocalCPUBackend while a Mooncake NoF "
+                    "RemoteBackend is active"
+                )
+
             backend = self.storage_backends.get(backend_name)
             if backend is None:
                 raise KeyError("Backend %s not found" % backend_name)
@@ -1336,7 +1367,7 @@ class StorageManager:
         logger.info("Closing StorageManager...")
 
         # Close all backends
-        for name, backend in self.storage_backends.items():
+        for name, backend in reversed(self.storage_backends.items()):
             try:
                 logger.info(f"Closing storage backend: {name}")
                 backend.close()
