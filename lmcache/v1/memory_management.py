@@ -449,9 +449,20 @@ def _allocate_cpu_memory(
         alloc_fn, *alloc_args = alloc_info
         ptr = alloc_fn(size, *alloc_args)
 
-    array_type = ctypes.c_uint8 * size
-    buf = array_type.from_address(ptr)
-    buffer = torch.frombuffer(buf, dtype=torch.uint8)
+    try:
+        array_type = ctypes.c_uint8 * size
+        buf = array_type.from_address(ptr)
+        buffer = torch.frombuffer(buf, dtype=torch.uint8)
+    except Exception:
+        if pinned_alloc_free is not None:
+            try:
+                pinned_alloc_free.free_fn(ptr, *pinned_alloc_free.free_args)
+            except Exception:
+                logger.exception(
+                    "Failed to release custom pinned memory after arena creation "
+                    "failed"
+                )
+        raise
 
     return buffer
 

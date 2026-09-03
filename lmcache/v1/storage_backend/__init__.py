@@ -255,12 +255,13 @@ def CreateStorageBackends(
         for plugin_name in config.remote_storage_plugins:
             if local_cpu_backend is None:
                 if (
-                    config.enable_mooncake_nof_pool
+                    config.uses_mooncake_local_cpu_allocator()
                     and plugin_name.split(".", 1)[0] == "mooncakestore"
                 ):
                     _close_backends_after_init_failure(storage_backends)
                     raise RuntimeError(
-                        "Mooncake NoF requires LocalCPUBackend on a worker process"
+                        "Mooncake Local CPU allocation requires LocalCPUBackend "
+                        "on a worker process"
                     )
                 raise AssertionError(
                     "Remote backend requires local CPU backend as a buffer. "
@@ -288,7 +289,7 @@ def CreateStorageBackends(
                     e,
                 )
                 if (
-                    config.enable_mooncake_nof_pool
+                    config.uses_mooncake_local_cpu_allocator()
                     and plugin_name.split(".", 1)[0] == "mooncakestore"
                 ):
                     _close_backends_after_init_failure(storage_backends)
@@ -310,7 +311,7 @@ def CreateStorageBackends(
                 dst_device,
             )
         except Exception:
-            if config.enable_mooncake_nof_pool:
+            if config.uses_mooncake_local_cpu_allocator():
                 _close_backends_after_init_failure(storage_backends)
             raise
         backend_name = str(remote_backend)

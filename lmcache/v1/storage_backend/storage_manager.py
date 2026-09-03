@@ -1195,12 +1195,12 @@ class StorageManager:
         with self.manager_lock:
             if (
                 backend_name == "LocalCPUBackend"
-                and self.config.enable_mooncake_nof_pool
+                and self.config.uses_mooncake_local_cpu_allocator()
                 and _has_mooncake_remote_backend(self.storage_backends)
             ):
                 logger.error(
-                    "Cannot close LocalCPUBackend while a Mooncake NoF "
-                    "RemoteBackend is active"
+                    "Cannot close the Mooncake-allocated LocalCPUBackend while a "
+                    "Mooncake RemoteBackend is active"
                 )
                 return False
 
@@ -1296,12 +1296,12 @@ class StorageManager:
         with self.manager_lock:
             if (
                 backend_name == "LocalCPUBackend"
-                and self.config.enable_mooncake_nof_pool
+                and self.config.uses_mooncake_local_cpu_allocator()
                 and _has_mooncake_remote_backend(self.storage_backends)
             ):
                 raise RuntimeError(
-                    "Cannot recreate LocalCPUBackend while a Mooncake NoF "
-                    "RemoteBackend is active"
+                    "Cannot recreate the Mooncake-allocated LocalCPUBackend while a "
+                    "Mooncake RemoteBackend is active"
                 )
 
             backend = self.storage_backends.get(backend_name)

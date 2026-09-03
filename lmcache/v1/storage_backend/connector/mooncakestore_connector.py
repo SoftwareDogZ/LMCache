@@ -439,6 +439,9 @@ class MooncakestoreConnector(RemoteConnector):
         self.replica_config.replica_num = 1
         engine_config = lmcache_config or local_cpu_backend.config
         self.nof_enabled = engine_config.enable_mooncake_nof_pool
+        self.mooncake_allocator_enabled = (
+            engine_config.uses_mooncake_local_cpu_allocator()
+        )
         nof_replica_num = (
             engine_config.mooncake_nof_replica_num if self.nof_enabled else 0
         )
@@ -458,7 +461,7 @@ class MooncakestoreConnector(RemoteConnector):
                 self.replica_config.preferred_segment = self.store.get_hostname()
 
             # Register CPU buffer for zero-copy operations
-            self._register_cpu_buffer(required=self.nof_enabled)
+            self._register_cpu_buffer(required=self.mooncake_allocator_enabled)
         except Exception:
             _close_store_after_init_failure(self.store)
             raise
@@ -486,7 +489,8 @@ class MooncakestoreConnector(RemoteConnector):
                 self.registered_buffer_ptr = None
                 if required:
                     raise IrrecoverableException(
-                        "Mooncake NoF requires a contiguous LocalCPUBackend buffer"
+                        "Mooncake Local CPU allocation requires a contiguous "
+                        "LocalCPUBackend buffer"
                     )
         except Exception as e:
             logger.error(f"Buffer registration error: {e}")
@@ -495,7 +499,7 @@ class MooncakestoreConnector(RemoteConnector):
                 if isinstance(e, IrrecoverableException):
                     raise
                 raise IrrecoverableException(
-                    "Mooncake NoF buffer registration failed"
+                    "Mooncake Local CPU buffer registration failed"
                 ) from e
 
     def _unregister_cpu_buffer(self) -> None:

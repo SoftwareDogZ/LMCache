@@ -226,23 +226,25 @@ Configuration
      - False
      - Prefer allocating on the local segment when possible.
 
-NoF-backed in-process memory
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Mooncake-backed in-process memory
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 LMCache can allocate the complete in-process ``LocalCPUBackend`` arena through
-Mooncake's NoF allocator. Mooncake owns the hugepage allocation, LMCache pins
-the returned range for CUDA access, and the Mooncake connector registers the
-same contiguous range for zero-copy network transfers.
+Mooncake's allocator. Mooncake owns the hugepage allocation, LMCache registers
+the returned range with CUDA or Ascend, and the Mooncake connector registers
+the same contiguous range for zero-copy network transfers. Memory allocation
+and NoF replication are separate controls.
 
 Build Mooncake with NoF support so that its Python binding exports
 ``get_alloc_func_addr``, ``get_free_func_addr``, and
-``ReplicateConfig.nof_replica_num``. Then enable the pool in the LMCache
-configuration:
+``ReplicateConfig.nof_replica_num``. Select the allocator and optionally enable
+NoF in the LMCache configuration:
 
 .. code-block:: yaml
 
-    local_cpu: false
+    local_cpu: true
     max_local_cpu_size: 20
+    local_cpu_allocator: mooncake
     remote_storage_plugins:
       - mooncakestore
     enable_mooncake_nof_pool: true
@@ -258,6 +260,24 @@ configuration:
       master_server_address: "localhost:50051"
       local_buffer_size: 0
 
+To use Mooncake hugepage allocation without NoF replicas, leave the NoF switch
+disabled:
+
+.. code-block:: yaml
+
+    local_cpu: true
+    max_local_cpu_size: 20
+    local_cpu_allocator: mooncake
+    enable_mooncake_nof_pool: false
+    remote_storage_plugins:
+      - mooncakestore
+
+On CUDA, LMCache registers the external Mooncake allocation with
+``cudaHostRegister``. On Ascend, it reuses the torch_npu runtime context and
+uses ``aclrtHostRegisterV2`` with mapping enabled. The CANN runtime must export
+``aclrtHostRegisterV2``; LMCache does not initialize, finalize, or reset the
+process-wide ACL runtime.
+
 ``mooncake_nof_replica_num`` accepts any positive integer. LMCache keeps the
 normal Mooncake replica count at one and forwards the configured NoF count to
 ``put_from``, ``batch_put_from``, and metadata-enabled ``put_parts`` writes.
@@ -265,11 +285,13 @@ When ``enable_mooncake_nof_pool`` is false, the effective NoF count is zero.
 The number of replicas that can actually be created is determined by the
 Mooncake deployment; LMCache deliberately applies no upper limit.
 
-The NoF pool requires ``max_local_cpu_size`` greater than zero and cannot be
-combined with P2P allocation, lazy allocation, POSIX SHM allocation, io_uring
-fixed buffers, or a local CPU alignment other than 4096 bytes. NIXL storage in
-this LMCache version owns a separate pool and can coexist with the NoF-backed
-LocalCPUBackend, but both pools contribute to the process's memory footprint.
+The Mooncake allocator requires ``max_local_cpu_size`` greater than zero and
+cannot be combined with P2P allocation, lazy allocation, POSIX SHM allocation,
+io_uring fixed buffers, or a local CPU alignment other than 4096 bytes. The
+arena size is rounded down to a system-page boundary before allocation and host
+registration. NIXL storage in this LMCache version owns a separate pool and can
+coexist with the Mooncake-backed LocalCPUBackend, but both pools contribute to
+the process's memory footprint.
 
 .. important::
    **Understanding global_segment_size**: This parameter defines the amount of memory each vLLM worker contributes to the distributed memory pool. 

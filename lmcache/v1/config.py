@@ -110,12 +110,21 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "env_converter": _to_bool,
     },
     "max_local_cpu_size": {"type": float, "default": 5.0, "env_converter": float},
+    "local_cpu_allocator": {
+        "type": str,
+        "default": "default",
+        "env_converter": str,
+        "description": (
+            "Local CPU arena allocator. Supported values are default and mooncake."
+        ),
+    },
     "enable_mooncake_nof_pool": {
         "type": bool,
         "default": False,
         "env_converter": _to_bool,
         "description": (
-            "Allocate the in-process LocalCPUBackend arena through Mooncake NoF."
+            "Enable Mooncake NoF writes and implicitly select Mooncake Local CPU "
+            "allocation."
         ),
     },
     "mooncake_nof_replica_num": {
@@ -645,8 +654,29 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
 
 
 # Specialized methods that are unique to LMCacheEngineConfig
-def _validate_config(self):
-    """Validate configuration"""
+def _uses_mooncake_local_cpu_allocator(self) -> bool:
+    """Return whether LocalCPUBackend must use the Mooncake allocator.
+
+    Returns:
+        True when explicitly selected or implicitly required by the legacy
+        ``enable_mooncake_nof_pool`` switch; otherwise False.
+
+    Notes:
+        Treating the NoF switch as an implicit allocator selection preserves
+        existing configurations while allowing Mooncake allocation without NoF.
+    """
+    return self.local_cpu_allocator == "mooncake" or self.enable_mooncake_nof_pool
+
+
+def _validate_config(self) -> None:
+    """Validate the complete LMCache engine configuration.
+
+    Raises:
+        ValueError: If a configuration value or combination is unsupported.
+    """
+
+    if self.local_cpu_allocator not in ("default", "mooncake"):
+        raise ValueError("local_cpu_allocator must be one of: 'default', 'mooncake'")
 
     if not isinstance(self.mooncake_nof_replica_num, int) or isinstance(
         self.mooncake_nof_replica_num, bool
@@ -655,44 +685,44 @@ def _validate_config(self):
     if self.mooncake_nof_replica_num < 0:
         raise ValueError("mooncake_nof_replica_num must be >= 0")
 
-    if self.enable_mooncake_nof_pool:
-        if self.mooncake_nof_replica_num == 0:
-            raise ValueError(
-                "enable_mooncake_nof_pool requires "
-                "mooncake_nof_replica_num to be >= 1"
-            )
+    if self.enable_mooncake_nof_pool and self.mooncake_nof_replica_num == 0:
+        raise ValueError(
+            "enable_mooncake_nof_pool requires "
+            "mooncake_nof_replica_num to be >= 1"
+        )
+
+    if self.uses_mooncake_local_cpu_allocator():
         if self.max_local_cpu_size <= 0:
             raise ValueError(
-                "enable_mooncake_nof_pool requires max_local_cpu_size > 0"
+                "Mooncake Local CPU allocation requires max_local_cpu_size > 0"
             )
         if self.enable_lazy_memory_allocator:
             raise ValueError(
                 "enable_lazy_memory_allocator cannot be used with "
-                "enable_mooncake_nof_pool"
+                "Mooncake Local CPU allocation"
             )
         if self.enable_p2p:
             raise ValueError(
-                "enable_p2p cannot be used with enable_mooncake_nof_pool"
+                "enable_p2p cannot be used with Mooncake Local CPU allocation"
             )
         if self.enable_pd and not self.local_cpu:
             raise ValueError(
-                "enable_mooncake_nof_pool requires local_cpu=True in PD mode"
+                "Mooncake Local CPU allocation requires local_cpu=True in PD mode"
             )
         if not _uses_mooncake_store(self):
             raise ValueError(
-                "enable_mooncake_nof_pool requires a mooncakestore remote backend"
+                "Mooncake Local CPU allocation requires a mooncakestore "
+                "remote backend"
             )
 
         extra_config = self.extra_config or {}
         if extra_config.get("shm_name"):
             raise ValueError(
                 "extra_config['shm_name'] cannot be used with "
-                "enable_mooncake_nof_pool"
+                "Mooncake Local CPU allocation"
             )
 
-        io_engine = str(
-            extra_config.get("rust_raw_block.io_engine", "") or ""
-        ).lower()
+        io_engine = str(extra_config.get("rust_raw_block.io_engine", "") or "").lower()
         use_uring = (
             io_engine == "io_uring"
             or bool(extra_config.get("rust_raw_block.use_iouring", False))
@@ -701,7 +731,7 @@ def _validate_config(self):
         if use_uring:
             raise ValueError(
                 "io_uring fixed-buffer mode cannot be used with "
-                "enable_mooncake_nof_pool"
+                "Mooncake Local CPU allocation"
             )
 
         explicit_align = extra_config.get("local_cpu.pinned_align_bytes")
@@ -711,12 +741,12 @@ def _validate_config(self):
             except (TypeError, ValueError) as exc:
                 raise ValueError(
                     "extra_config['local_cpu.pinned_align_bytes'] must be 4096 "
-                    "when enable_mooncake_nof_pool is enabled"
+                    "with Mooncake Local CPU allocation"
                 ) from exc
             if align_bytes != 4096:
                 raise ValueError(
                     "extra_config['local_cpu.pinned_align_bytes'] must be 4096 "
-                    "when enable_mooncake_nof_pool is enabled"
+                    "with Mooncake Local CPU allocation"
                 )
 
     # needed for the old async serializer implementation
@@ -999,6 +1029,7 @@ LMCacheEngineConfig = create_config_class(
     deprecated_configs=_DEPRECATED_CONFIGS,
     namespace_extras={
         "validate": _validate_config,
+        "uses_mooncake_local_cpu_allocator": _uses_mooncake_local_cpu_allocator,
         "log_config": _log_config,
         "get_extra_config_value": _get_extra_config_value,
         "get_lmcache_worker_ids": _get_lmcache_worker_ids,

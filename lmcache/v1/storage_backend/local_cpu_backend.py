@@ -2,6 +2,7 @@
 # Standard
 from concurrent.futures import Future
 from typing import TYPE_CHECKING, Any, Callable, List, Optional, Sequence, Union
+import os
 import threading
 import time
 
@@ -350,6 +351,21 @@ class LocalCPUBackend(AllocatorBackendInterface):
         config: LMCacheEngineConfig,
         metadata: Optional[LMCacheMetadata] = None,
     ) -> MemoryAllocatorInterface:
+        """Create the allocator for the LocalCPUBackend arena.
+
+        Args:
+            config: Engine configuration controlling allocation and capacity.
+            metadata: Optional model and worker metadata used for sizing.
+
+        Returns:
+            The initialized local CPU memory allocator.
+
+        Raises:
+            ValueError: If the configured arena size cannot satisfy allocator
+                alignment requirements.
+            RuntimeError: If the selected allocator cannot allocate or register
+                its arena.
+        """
         cpu_size = config.max_local_cpu_size
 
         if metadata is not None:
@@ -381,16 +397,29 @@ class LocalCPUBackend(AllocatorBackendInterface):
                 allocator_align_bytes,
             )
 
-        if config.enable_mooncake_nof_pool:
+        if config.uses_mooncake_local_cpu_allocator():
+            page_size = os.sysconf("SC_PAGESIZE")
+            aligned_size_bytes = cpu_size_bytes - (cpu_size_bytes % page_size)
+            if aligned_size_bytes <= 0:
+                raise ValueError(
+                    "Mooncake Local CPU arena must contain at least one system page"
+                )
+            if aligned_size_bytes != cpu_size_bytes:
+                logger.info(
+                    "LocalCPUBackend: aligning Mooncake arena from %d to %d bytes",
+                    cpu_size_bytes,
+                    aligned_size_bytes,
+                )
+                cpu_size_bytes = aligned_size_bytes
             pinned_alloc_free = create_mooncake_pinned_alloc_free(cpu_size_bytes)
             logger.info(
-                "LocalCPUBackend: using Mooncake NoF allocation for %d bytes",
+                "LocalCPUBackend: using Mooncake allocation for %d bytes",
                 cpu_size_bytes,
             )
             return MixedMemoryAllocator(
                 cpu_size_bytes,
                 numa_mapping=numa_mapping,
-                align_bytes=4096,
+                align_bytes=page_size,
                 pinned_alloc_free=pinned_alloc_free,
             )
 

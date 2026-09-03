@@ -7,6 +7,7 @@ from types import ModuleType, SimpleNamespace
 from typing import Any, cast
 import asyncio
 import ctypes
+import os
 import sys
 import threading
 
@@ -30,6 +31,7 @@ from lmcache.v1.storage_backend.connector.mooncakestore_connector import (
 )
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.storage_manager import StorageManager
+import lmcache.v1.memory_management as memory_management_module
 import lmcache.v1.mooncake_memory_provider as provider_module
 import lmcache.v1.storage_backend.local_cpu_backend as local_cpu_backend_module
 
@@ -70,6 +72,7 @@ def test_nof_replica_num_accepts_positive_counts(replica_num: int) -> None:
     config = _nof_config(replica_num)
     config.validate()
     assert config.mooncake_nof_replica_num == replica_num
+    assert config.uses_mooncake_local_cpu_allocator() is True
 
 
 @pytest.mark.parametrize("replica_num", [0, -1, True, 1.5])
@@ -96,6 +99,38 @@ def test_nof_requires_mooncake_remote_backend() -> None:
     """NoF allocation is rejected without an in-process Mooncake backend."""
     config = _nof_config(remote_storage_plugins=None)
     with pytest.raises(ValueError, match="requires a mooncakestore remote backend"):
+        config.validate()
+
+
+def test_mooncake_allocator_can_be_enabled_without_nof() -> None:
+    """Mooncake allocation is independently selectable while NoF stays off."""
+    config = LMCacheEngineConfig.from_defaults(
+        local_cpu_allocator="mooncake",
+        enable_mooncake_nof_pool=False,
+        remote_storage_plugins=["mooncakestore"],
+    )
+    config.validate()
+
+    assert config.uses_mooncake_local_cpu_allocator() is True
+    assert config.enable_mooncake_nof_pool is False
+
+
+def test_mooncake_allocator_rejects_unknown_value() -> None:
+    """The public configuration rejects unknown Local CPU allocators."""
+    config = LMCacheEngineConfig.from_defaults(local_cpu_allocator="unknown")
+    with pytest.raises(ValueError, match="local_cpu_allocator"):
+        config.validate()
+
+
+def test_mooncake_allocator_constraints_apply_without_nof() -> None:
+    """Allocator safety constraints do not depend on the NoF switch."""
+    config = LMCacheEngineConfig.from_defaults(
+        local_cpu_allocator="mooncake",
+        enable_mooncake_nof_pool=False,
+        max_local_cpu_size=0,
+        remote_storage_plugins=["mooncakestore"],
+    )
+    with pytest.raises(ValueError, match="max_local_cpu_size"):
         config.validate()
 
 
@@ -163,6 +198,35 @@ def test_mixed_allocator_uses_injected_callbacks() -> None:
     assert calls == [("alloc", 64), ("free", ctypes.addressof(backing))]
 
 
+def test_mixed_allocator_rolls_back_when_tensor_view_creation_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Arena view failures release a successfully registered custom buffer."""
+    backing = (ctypes.c_uint8 * 64)()
+    freed: list[int] = []
+
+    callbacks = PinnedAllocFree(
+        alloc_fn=lambda size: ctypes.addressof(backing),
+        alloc_args=(),
+        free_fn=lambda ptr: freed.append(ptr),
+        free_args=(),
+    )
+
+    def fail_frombuffer(*args: Any, **kwargs: Any) -> torch.Tensor:
+        raise RuntimeError("view failed")
+
+    monkeypatch.setattr(
+        memory_management_module.torch,
+        "frombuffer",
+        fail_frombuffer,
+    )
+
+    with pytest.raises(RuntimeError, match="view failed"):
+        MixedMemoryAllocator(64, pinned_alloc_free=callbacks)
+
+    assert freed == [ctypes.addressof(backing)]
+
+
 def test_mooncake_provider_rolls_back_failed_cuda_registration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -195,9 +259,122 @@ def test_mooncake_provider_rolls_back_failed_cuda_registration(
     )
 
     callbacks = create_mooncake_pinned_alloc_free(64)
-    with pytest.raises(RuntimeError, match="register Mooncake NoF memory"):
+    with pytest.raises(RuntimeError, match="register Mooncake memory"):
         callbacks.alloc_fn(64)
     assert freed == [ctypes.addressof(backing)]
+
+
+def test_mooncake_provider_pairs_registration_with_unregistration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A successful arena uses matching register, unregister, and free calls."""
+    backing = (ctypes.c_uint8 * 64)()
+    calls: list[tuple[str, int, int | None]] = []
+    alloc_type = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_size_t)
+    free_type = ctypes.CFUNCTYPE(None, ctypes.c_void_p)
+    alloc_callback = alloc_type(lambda size: ctypes.addressof(backing))
+    free_callback = free_type(lambda ptr: calls.append(("free", int(ptr), None)))
+
+    store_module = ModuleType("mooncake.store")
+    setattr(
+        store_module,
+        "get_alloc_func_addr",
+        lambda: ctypes.cast(alloc_callback, ctypes.c_void_p).value,
+    )
+    setattr(
+        store_module,
+        "get_free_func_addr",
+        lambda: ctypes.cast(free_callback, ctypes.c_void_p).value,
+    )
+    monkeypatch.setitem(sys.modules, "mooncake", ModuleType("mooncake"))
+    monkeypatch.setitem(sys.modules, "mooncake.store", store_module)
+
+    registrar = SimpleNamespace(
+        register=lambda ptr, size: calls.append(("register", ptr, size)),
+        unregister=lambda ptr: calls.append(("unregister", ptr, None)),
+    )
+    monkeypatch.setattr(
+        provider_module, "_create_host_memory_registrar", lambda: registrar
+    )
+
+    callbacks = create_mooncake_pinned_alloc_free(64)
+    ptr = callbacks.alloc_fn(64)
+    callbacks.free_fn(ptr)
+
+    assert calls == [
+        ("register", ctypes.addressof(backing), 64),
+        ("unregister", ctypes.addressof(backing), None),
+        ("free", ctypes.addressof(backing), None),
+    ]
+
+
+def test_mooncake_provider_uses_ascend_v2_dual_registration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Ascend provider maps an external allocation through ACL V2."""
+    page_size = os.sysconf("SC_PAGESIZE")
+    ptr = page_size * 1024
+    freed: list[int] = []
+    acl_calls: list[tuple[str, int, int | None, int | None]] = []
+    alloc_type = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_size_t)
+    free_type = ctypes.CFUNCTYPE(None, ctypes.c_void_p)
+    alloc_callback = alloc_type(lambda size: ptr)
+    free_callback = free_type(lambda freed_ptr: freed.append(int(freed_ptr)))
+
+    store_module = ModuleType("mooncake.store")
+    setattr(
+        store_module,
+        "get_alloc_func_addr",
+        lambda: ctypes.cast(alloc_callback, ctypes.c_void_p).value,
+    )
+    setattr(
+        store_module,
+        "get_free_func_addr",
+        lambda: ctypes.cast(free_callback, ctypes.c_void_p).value,
+    )
+    monkeypatch.setitem(sys.modules, "mooncake", ModuleType("mooncake"))
+    monkeypatch.setitem(sys.modules, "mooncake.store", store_module)
+
+    class FakeAclFunction:
+        def __init__(self, name: str) -> None:
+            self.name = name
+            self.argtypes: list[Any] = []
+            self.restype: Any = None
+
+        def __call__(self, *args: Any) -> int:
+            acl_ptr = cast(ctypes.c_void_p, args[0]).value
+            size = int(args[1]) if len(args) > 1 else None
+            flags = int(args[2]) if len(args) > 2 else None
+            acl_calls.append((self.name, int(acl_ptr or 0), size, flags))
+            return 0
+
+    fake_ascendcl = SimpleNamespace(
+        aclrtHostRegisterV2=FakeAclFunction("register"),
+        aclrtHostUnregister=FakeAclFunction("unregister"),
+    )
+    fake_npu = SimpleNamespace(
+        is_available=lambda: True,
+        current_device=lambda: 0,
+        current_stream=lambda: object(),
+    )
+    monkeypatch.setattr(provider_module.torch, "npu", fake_npu, raising=False)
+    monkeypatch.setattr(provider_module, "_load_ascendcl", lambda: fake_ascendcl)
+
+    callbacks = create_mooncake_pinned_alloc_free(page_size)
+    allocated_ptr = callbacks.alloc_fn(page_size)
+    callbacks.free_fn(allocated_ptr)
+
+    expected_flags = 0x10000002
+    assert acl_calls == [
+        ("register", ptr, page_size, expected_flags),
+        ("unregister", ptr, None, None),
+    ]
+    assert fake_ascendcl.aclrtHostRegisterV2.argtypes == [
+        ctypes.c_void_p,
+        ctypes.c_uint64,
+        ctypes.c_uint32,
+    ]
+    assert freed == [ptr]
 
 
 def test_local_cpu_backend_uses_mooncake_allocator_callbacks(
@@ -230,13 +407,21 @@ def test_local_cpu_backend_uses_mooncake_allocator_callbacks(
     )
     monkeypatch.setattr(local_cpu_backend_module, "MixedMemoryAllocator", FakeAllocator)
 
-    config = _nof_config()
+    config = LMCacheEngineConfig.from_defaults(
+        chunk_size=2,
+        max_local_cpu_size=0.01,
+        local_cpu_allocator="mooncake",
+        enable_mooncake_nof_pool=False,
+        remote_storage_plugins=["mooncakestore"],
+    )
     config.validate()
     backend = LocalCPUBackend(config=config, metadata=_metadata())
 
-    assert captured["provider_size"] == int(config.max_local_cpu_size * 1024**3)
+    configured_size = int(config.max_local_cpu_size * 1024**3)
+    page_size = os.sysconf("SC_PAGESIZE")
+    assert captured["provider_size"] == configured_size - configured_size % page_size
     assert captured["pinned_alloc_free"] is callback_marker
-    assert captured["align_bytes"] == 4096
+    assert captured["align_bytes"] == page_size
     assert backend.get_pinned_buffer() is not None
     backend.close()
 
@@ -403,12 +588,38 @@ def test_connector_registration_failure_is_fatal_for_nof(
     loop.close()
 
 
+def test_connector_registration_failure_is_fatal_for_mooncake_allocator(
+    fake_mooncake: None,
+) -> None:
+    """Mooncake allocation without NoF still requires store registration."""
+    _FakeMooncakeStore.registration_result = -1
+    config = LMCacheEngineConfig.from_defaults(
+        chunk_size=2,
+        local_cpu_allocator="mooncake",
+        enable_mooncake_nof_pool=False,
+        remote_storage_plugins=["mooncakestore"],
+    )
+    config.validate()
+    loop = asyncio.new_event_loop()
+
+    with pytest.raises(IrrecoverableException, match="registration failed"):
+        MooncakestoreConnector(
+            loop,
+            _FakeLocalCPUBackend(config),  # type: ignore[arg-type]
+            config,
+        )
+
+    assert _FakeMooncakeStore.instances[-1].closed is True
+    loop.close()
+
+
 def test_disabled_nof_switch_uses_zero_effective_replicas(
     fake_mooncake: None,
 ) -> None:
     """The switch disables NoF writes even when a positive count is configured."""
     config = LMCacheEngineConfig.from_defaults(
         chunk_size=2,
+        local_cpu_allocator="mooncake",
         enable_mooncake_nof_pool=False,
         mooncake_nof_replica_num=9,
         remote_storage_plugins=["mooncakestore"],
@@ -456,10 +667,13 @@ def test_storage_manager_closes_dependents_before_local_cpu() -> None:
     assert close_order == ["remote", "local"]
 
 
-def test_storage_manager_refuses_to_close_live_nof_arena() -> None:
-    """Dynamic APIs cannot free the NoF arena before remote unregistration."""
+def test_storage_manager_refuses_to_close_live_mooncake_arena() -> None:
+    """Dynamic APIs cannot free the Mooncake arena before unregistration."""
     manager = StorageManager.__new__(StorageManager)
-    manager.config = _nof_config()
+    manager.config = LMCacheEngineConfig.from_defaults(
+        local_cpu_allocator="mooncake",
+        remote_storage_plugins=["mooncakestore"],
+    )
     manager.manager_lock = threading.Lock()
     manager.storage_backends = cast(
         Any,

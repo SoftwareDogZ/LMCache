@@ -34,11 +34,16 @@ Basic cache settings that control the core functionality of LMCache.
    * - max_local_cpu_size
      - LMCACHE_MAX_LOCAL_CPU_SIZE
      - Maximum CPU cache size in GB. Default: 5.0
+   * - local_cpu_allocator
+     - LMCACHE_LOCAL_CPU_ALLOCATOR
+     - Allocator for the in-process LocalCPUBackend arena. Values: ``default``
+       or ``mooncake``. The Mooncake option supports hugepage-backed allocation
+       independently of NoF replication. Default: ``default``
    * - enable_mooncake_nof_pool
      - LMCACHE_ENABLE_MOONCAKE_NOF_POOL
-     - Allocate the in-process LocalCPUBackend arena with Mooncake's NoF
-       allocator and register it for zero-copy transfers. Requires a Mooncake
-       remote backend. Default: false
+     - Enable NoF writes. For backward compatibility this also implicitly
+       selects ``local_cpu_allocator: mooncake``. Requires a Mooncake remote
+       backend. Default: false
    * - mooncake_nof_replica_num
      - LMCACHE_MOONCAKE_NOF_REPLICA_NUM
      - Number of NoF replicas requested for each Mooncake write when
