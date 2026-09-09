@@ -458,7 +458,9 @@ class MooncakestoreConnector(RemoteConnector):
                 self.replica_config.preferred_segment = self.store.get_hostname()
 
             # Register CPU buffer for zero-copy operations
-            self._register_cpu_buffer(required=self.nof_enabled)
+            self._register_cpu_buffer(
+                required=engine_config.uses_mooncake_local_cpu_allocator()
+            )
         except Exception:
             _close_store_after_init_failure(self.store)
             raise

@@ -99,6 +99,25 @@ def test_nof_requires_mooncake_remote_backend() -> None:
         config.validate()
 
 
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("allocator", ["mooncake", "mooncake_mmap_huge2m"])
+def test_explicit_mooncake_allocator(enabled: bool, allocator: str) -> None:
+    """Explicit allocation is independent of NoF writes and survives validation."""
+    config = _nof_config(
+        enable_mooncake_nof_pool=enabled, local_cpu_allocator=allocator
+    )
+    config.validate()
+    assert config.local_cpu_allocator == allocator
+    assert config.uses_mooncake_local_cpu_allocator()
+
+
+def test_invalid_local_allocator() -> None:
+    """Unknown allocators must fail before backend initialization."""
+    config = _nof_config(local_cpu_allocator="unknown")
+    with pytest.raises(ValueError, match="local_cpu_allocator"):
+        config.validate()
+
+
 @pytest.mark.parametrize(
     ("overrides", "message"),
     [
@@ -119,11 +138,16 @@ def test_nof_requires_mooncake_remote_backend() -> None:
         ),
     ],
 )
+@pytest.mark.parametrize("explicit_allocator", [False, True])
 def test_nof_rejects_incompatible_allocator_modes(
-    overrides: dict[str, Any], message: str
+    overrides: dict[str, Any], message: str, explicit_allocator: bool
 ) -> None:
     """NoF validation rejects modes that cannot share its contiguous arena."""
-    config = _nof_config(**overrides)
+    config = _nof_config(
+        enable_mooncake_nof_pool=not explicit_allocator,
+        local_cpu_allocator="mooncake_mmap_huge2m" if explicit_allocator else "default",
+        **overrides,
+    )
     with pytest.raises(ValueError, match=message):
         config.validate()
 
@@ -195,7 +219,7 @@ def test_mooncake_provider_rolls_back_failed_cuda_registration(
     )
 
     callbacks = create_mooncake_pinned_alloc_free(64)
-    with pytest.raises(RuntimeError, match="register Mooncake NoF memory"):
+    with pytest.raises(RuntimeError, match="register Mooncake memory"):
         callbacks.alloc_fn(64)
     assert freed == [ctypes.addressof(backing)]
 

@@ -2,6 +2,7 @@
 # Standard
 from concurrent.futures import Future
 from typing import TYPE_CHECKING, Any, Callable, List, Optional, Sequence, Union
+import os
 import threading
 import time
 
@@ -381,10 +382,25 @@ class LocalCPUBackend(AllocatorBackendInterface):
                 allocator_align_bytes,
             )
 
-        if config.enable_mooncake_nof_pool:
-            pinned_alloc_free = create_mooncake_pinned_alloc_free(cpu_size_bytes)
+        if config.uses_mooncake_local_cpu_allocator():
+            if config.local_cpu_allocator == "mooncake_mmap_huge2m":
+                page_size = os.sysconf("SC_PAGESIZE")
+                cpu_size_bytes -= cpu_size_bytes % page_size
+                if cpu_size_bytes <= 0:
+                    raise ValueError("Mooncake arena must contain at least one page")
+                numa_node = -1
+                if numa_mapping:
+                    device_id = torch_dev.current_device()
+                    numa_node = numa_mapping.gpu_to_numa_mapping.get(device_id, -1)
+                pinned_alloc_free = create_mooncake_pinned_alloc_free(
+                    cpu_size_bytes,
+                    allocator="mooncake_mmap_huge2m",
+                    numa_node=numa_node,
+                )
+            else:
+                pinned_alloc_free = create_mooncake_pinned_alloc_free(cpu_size_bytes)
             logger.info(
-                "LocalCPUBackend: using Mooncake NoF allocation for %d bytes",
+                "LocalCPUBackend: using Mooncake allocation for %d bytes",
                 cpu_size_bytes,
             )
             return MixedMemoryAllocator(
