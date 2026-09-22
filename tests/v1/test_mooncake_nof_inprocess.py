@@ -3,6 +3,7 @@
 
 # Standard
 from collections import OrderedDict
+from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any, cast
 import asyncio
@@ -97,6 +98,38 @@ def test_nof_requires_mooncake_remote_backend() -> None:
     config = _nof_config(remote_storage_plugins=None)
     with pytest.raises(ValueError, match="requires a mooncakestore remote backend"):
         config.validate()
+
+
+@pytest.mark.parametrize("count", [-1, True, 1.5])
+def test_invalid_memory_replica_count(count: Any) -> None:
+    """Memory replica counts reject negatives, booleans and fractions."""
+    config = _nof_config(mooncake_memory_replica_num=count)
+    with pytest.raises(ValueError, match="mooncake_memory_replica_num"):
+        config.validate()
+
+
+def test_zero_memory_replicas_requires_active_nof() -> None:
+    """A configured but disabled NoF count cannot replace memory replicas."""
+    config = _nof_config(
+        enable_mooncake_nof_pool=False, mooncake_memory_replica_num=0
+    )
+    with pytest.raises(ValueError, match="mooncake_memory_replica_num"):
+        config.validate()
+
+
+def test_memory_replica_count_from_yaml_and_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The public YAML and environment loaders preserve the configured count."""
+    config_path = tmp_path / "replicas.yaml"
+    config_path.write_text("mooncake_memory_replica_num: 3\n")
+    config = LMCacheEngineConfig.from_file(config_path)
+    config.validate()
+    assert config.mooncake_memory_replica_num == 3
+    monkeypatch.setenv("LMCACHE_MOONCAKE_MEMORY_REPLICA_NUM", "4")
+    config = LMCacheEngineConfig.from_env()
+    config.validate()
+    assert config.mooncake_memory_replica_num == 4
 
 
 @pytest.mark.parametrize("enabled", [False, True])
@@ -378,12 +411,22 @@ def fake_mooncake(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.parametrize("save_chunk_meta", [False, True])
+@pytest.mark.parametrize(
+    "memory_count,nof_enabled", [(1, True), (2, True), (0, True), (2, False)]
+)
 def test_connector_passes_configured_nof_count_to_store_paths(
     fake_mooncake: None,
     save_chunk_meta: bool,
+    memory_count: int,
+    nof_enabled: bool,
 ) -> None:
     """Every store path preserves the configured NoF replica count."""
-    config = _nof_config(5, save_chunk_meta=save_chunk_meta)
+    config = _nof_config(
+        5,
+        save_chunk_meta=save_chunk_meta,
+        mooncake_memory_replica_num=memory_count,
+        enable_mooncake_nof_pool=nof_enabled,
+    )
     config.validate()
     loop = asyncio.new_event_loop()
     connector = MooncakestoreConnector(
@@ -404,8 +447,10 @@ def test_connector_passes_configured_nof_count_to_store_paths(
         if operation in {"put_from", "batch_put_from", "put_parts"}
     ]
     assert operation_calls
-    assert all(call.nof_replica_num == 5 for call in operation_calls)
-    assert all(call.replica_num == 1 for call in operation_calls)
+    assert all(
+        call.nof_replica_num == (5 if nof_enabled else 0) for call in operation_calls
+    )
+    assert all(call.replica_num == memory_count for call in operation_calls)
     asyncio.run(connector.close())
     loop.close()
 

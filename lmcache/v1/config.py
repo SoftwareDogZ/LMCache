@@ -57,6 +57,14 @@ def _to_mooncake_nof_replica_num(value: Any) -> int:
     raise ValueError("mooncake_nof_replica_num must be an integer")
 
 
+def _to_mooncake_memory_replica_num(value: Any) -> int:
+    """Parse an integer memory replica count; reject booleans and fractions."""
+    try:
+        return _to_mooncake_nof_replica_num(value)
+    except ValueError as exc:
+        raise ValueError("mooncake_memory_replica_num must be an integer") from exc
+
+
 def _uses_mooncake_store(config: Any) -> bool:
     """Return whether an in-process Mooncake remote backend is configured."""
     remote_url = config.remote_url
@@ -126,6 +134,12 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "description": (
             "Allocate the in-process LocalCPUBackend arena through Mooncake NoF."
         ),
+    },
+    "mooncake_memory_replica_num": {
+        "type": int,
+        "default": 1,
+        "env_converter": _to_mooncake_memory_replica_num,
+        "description": "Number of Mooncake memory replicas for remote writes.",
     },
     "mooncake_nof_replica_num": {
         "type": int,
@@ -684,6 +698,19 @@ def _validate_config(self):
         raise ValueError("mooncake_nof_replica_num must be an integer")
     if self.mooncake_nof_replica_num < 0:
         raise ValueError("mooncake_nof_replica_num must be >= 0")
+
+    if not isinstance(self.mooncake_memory_replica_num, int) or isinstance(
+        self.mooncake_memory_replica_num, bool
+    ):
+        raise ValueError("mooncake_memory_replica_num must be an integer")
+    if self.mooncake_memory_replica_num < 0:
+        raise ValueError("mooncake_memory_replica_num must be >= 0")
+    if self.mooncake_memory_replica_num == 0 and not (
+        self.enable_mooncake_nof_pool and self.mooncake_nof_replica_num > 0
+    ):
+        raise ValueError(
+            "mooncake_memory_replica_num=0 requires enabled NoF with positive replicas"
+        )
 
     if self.enable_mooncake_nof_pool:
         if self.mooncake_nof_replica_num == 0:

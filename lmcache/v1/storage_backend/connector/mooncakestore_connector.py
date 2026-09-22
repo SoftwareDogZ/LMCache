@@ -130,6 +130,7 @@ _LMCACHE_ONLY_KEYS = {
     "mooncake_storage_root_dir",
     "mooncake_prefer_local_alloc",
     "mooncake_nof_replica_num",
+    "mooncake_memory_replica_num",
 }
 
 # Legacy keys that are forwarded without prefix (for compat).
@@ -436,8 +437,8 @@ class MooncakestoreConnector(RemoteConnector):
 
         # Initialize ReplicateConfig
         self.replica_config = ReplicateConfig()
-        self.replica_config.replica_num = 1
         engine_config = lmcache_config or local_cpu_backend.config
+        self.replica_config.replica_num = engine_config.mooncake_memory_replica_num
         self.nof_enabled = engine_config.enable_mooncake_nof_pool
         nof_replica_num = (
             engine_config.mooncake_nof_replica_num if self.nof_enabled else 0
@@ -839,7 +840,7 @@ class MooncakestoreConnector(RemoteConnector):
             ).serialize()
             assert len(metadata_bytes) == self.remote_metadata_bytes
 
-            if self.nof_enabled:
+            if self.nof_enabled or self.replica_config.replica_num != 1:
                 put_task = asyncio.to_thread(
                     self.store.put_parts,
                     key_str,
@@ -864,9 +865,9 @@ class MooncakestoreConnector(RemoteConnector):
                 "Decode instance may redo prefill."
             )
         except TypeError as e:
-            if self.nof_enabled:
+            if self.nof_enabled or self.replica_config.replica_num != 1:
                 raise IrrecoverableException(
-                    "Mooncake NoF metadata stores require put_parts(..., "
+                    "Mooncake custom replica metadata stores require put_parts(..., "
                     "config=ReplicateConfig) support"
                 ) from e
             raise
