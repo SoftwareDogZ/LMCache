@@ -75,24 +75,33 @@ class _AscendHostMemoryRegistrar:
     def __init__(self) -> None:
         npu = getattr(torch, "npu", None)
         if npu is None or not npu.is_available():
-            raise RuntimeError("Ascend host registration support is unavailable")
+            raise RuntimeError(
+                "Ascend host registration support is unavailable"
+            )
 
-        # Reuse the ACL runtime context owned by torch_npu/vLLM-Ascend. LMCache
-        # must not call aclInit, aclFinalize, or aclrtResetDevice in-process.
+        # Reuse torch_npu/vLLM-Ascend's ACL context.
         try:
             npu.current_device()
             npu.current_stream()
         except Exception as exc:
-            raise RuntimeError("Cannot access the current Ascend context") from exc
+            raise RuntimeError(
+                "Cannot access the current Ascend context"
+            ) from exc
 
         ascendcl = _load_ascendcl()
+
         try:
             self.host_register = ascendcl.aclrtHostRegisterV2
+            self.host_get_device_pointer = (
+                ascendcl.aclrtHostGetDevicePointer
+            )
             self.host_unregister = ascendcl.aclrtHostUnregister
         except AttributeError as exc:
             raise RuntimeError(
                 "The installed CANN runtime does not provide "
-                "aclrtHostRegisterV2/aclrtHostUnregister"
+                "aclrtHostRegisterV2/"
+                "aclrtHostGetDevicePointer/"
+                "aclrtHostUnregister"
             ) from exc
 
         self.host_register.argtypes = [
@@ -101,25 +110,145 @@ class _AscendHostMemoryRegistrar:
             ctypes.c_uint32,
         ]
         self.host_register.restype = ctypes.c_int
-        self.host_unregister.argtypes = [ctypes.c_void_p]
+
+        self.host_get_device_pointer.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.c_uint32,
+        ]
+        self.host_get_device_pointer.restype = ctypes.c_int
+
+        self.host_unregister.argtypes = [
+            ctypes.c_void_p,
+        ]
         self.host_unregister.restype = ctypes.c_int
 
     def register(self, ptr: int, size: int) -> None:
         page_size = os.sysconf("SC_PAGESIZE")
+
         if ptr % page_size != 0 or size % page_size != 0:
             raise RuntimeError(
-                "aclrtHostRegisterV2 requires a page-aligned address and size: "
-                f"ptr=0x{ptr:x}, size={size}, page_size={page_size}"
+                "aclrtHostRegisterV2 requires a page-aligned "
+                "address and size: "
+                f"ptr=0x{ptr:x}, size={size}, "
+                f"page_size={page_size}"
             )
-        flags = _ACL_HOST_REGISTER_TYPE | _ACL_HOST_REGISTER_MAP
-        result = int(self.host_register(ctypes.c_void_p(ptr), size, flags))
+
+        flags = (
+            _ACL_HOST_REGISTER_TYPE
+            | _ACL_HOST_REGISTER_MAP
+        )
+
+        result = int(
+            self.host_register(
+                ctypes.c_void_p(ptr),
+                size,
+                flags,
+            )
+        )
+
         if result != _ACL_SUCCESS:
-            raise RuntimeError(f"aclrtHostRegisterV2 returned error {result}")
+            raise RuntimeError(
+                f"aclrtHostRegisterV2 returned error {result}"
+            )
+
+        # Get the NPU-visible address corresponding to this
+        # registered Host address.
+        dev_ptr = ctypes.c_void_p()
+
+        result = int(
+            self.host_get_device_pointer(
+                ctypes.c_void_p(ptr),
+                ctypes.byref(dev_ptr),
+                0,
+            )
+        )
+
+        if result != _ACL_SUCCESS:
+            self.host_unregister(ctypes.c_void_p(ptr))
+            raise RuntimeError(
+                "aclrtHostGetDevicePointer returned error "
+                f"{result}"
+            )
+
+        dev_addr = int(dev_ptr.value or 0)
+
+        if dev_addr == 0:
+            self.host_unregister(ctypes.c_void_p(ptr))
+            raise RuntimeError(
+                "aclrtHostGetDevicePointer returned NULL"
+            )
+
+        # IMPORTANT:
+        # Import lazily. Importing lmcache_ascend at module load
+        # time causes lmcache <-> lmcache_ascend circular import.
+        from lmcache_ascend import c_ops as lmc_ops
+
+        try:
+            lmc_ops.register_mapping(
+                int(ptr),
+                int(dev_addr),
+                int(size),
+            )
+
+            lookup = int(
+                lmc_ops.get_device_ptr(int(ptr)) or 0
+            )
+
+            if lookup != dev_addr:
+                raise RuntimeError(
+                    "LMCache-Ascend mapping mismatch: "
+                    f"host=0x{ptr:x}, "
+                    f"dev=0x{dev_addr:x}, "
+                    f"lookup=0x{lookup:x}"
+                )
+
+        except Exception:
+            # If register_mapping succeeded, unregister_ptr()
+            # also removes the manager record and ACL registration.
+            try:
+                lookup = int(
+                    lmc_ops.get_device_ptr(int(ptr)) or 0
+                )
+
+                if lookup:
+                    lmc_ops.unregister_ptr(int(ptr))
+                else:
+                    self.host_unregister(
+                        ctypes.c_void_p(ptr)
+                    )
+            except Exception:
+                self.host_unregister(
+                    ctypes.c_void_p(ptr)
+                )
+
+            raise
+
+        print(
+            "[Mooncake][Ascend] mapping registered "
+            f"host=0x{ptr:x} "
+            f"dev=0x{dev_addr:x} "
+            f"lookup=0x{lookup:x} "
+            f"size={size}",
+            flush=True,
+        )
 
     def unregister(self, ptr: int) -> None:
-        result = int(self.host_unregister(ctypes.c_void_p(ptr)))
+        # register_mapping() added this pointer to
+        # HostRegisteredMemoryManager, so unregister through
+        # LMCache-Ascend as well. Its unregister_ptr() removes
+        # the mapping and calls aclrtHostUnregister().
+        from lmcache_ascend import c_ops as lmc_ops
+
+        result = int(
+            lmc_ops.unregister_ptr(int(ptr))
+        )
+
         if result != _ACL_SUCCESS:
-            raise RuntimeError(f"aclrtHostUnregister returned error {result}")
+            raise RuntimeError(
+                "LMCache-Ascend unregister_ptr returned "
+                f"error {result}"
+            )
 
 
 def _ascend_is_available() -> bool:
