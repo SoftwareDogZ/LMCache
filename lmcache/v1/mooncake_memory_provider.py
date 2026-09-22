@@ -145,10 +145,14 @@ def create_mooncake_pinned_alloc_free(
 
     Args:
         size: Number of bytes in the eager LocalCPUBackend arena.
-        allocator: "mooncake" for legacy SPDK allocation or
-            "mooncake_mmap_huge2m" for externally mapped HugeTLB memory.
-        numa_node: NUMA node for HugeTLB allocation; -1 preserves default policy.
-            Mooncake must bind before first touch and SPDK registration.
+        allocator: "mooncake" for legacy SPDK allocation,
+            "mooncake_mmap_huge2m" for a single-policy HugeTLB mapping, or
+            "mooncake_mmap_huge2m_numa" for a HugeTLB mapping split equally
+            across the nodes in ``MC_NOF_HOST_NUMA_NODES``.
+        numa_node: NUMA node for HugeTLB allocation; -1 preserves default policy
+            or configured node order. For the segmented allocator, a configured
+            node is rotated to the first region. Mooncake must bind before first
+            touch and SPDK registration.
 
     Returns:
         Allocation callbacks that allocate through Mooncake and register the
@@ -160,9 +164,9 @@ def create_mooncake_pinned_alloc_free(
             registration are unavailable, or allocation or registration fails.
 
     Notes:
-        New Mooncake bindings must export get_mmap_huge2m_alloc_func_addr()
-        returning void* (*)(size_t, int32_t) and
-        get_mmap_huge2m_free_func_addr() returning void (*)(void*).
+        New Mooncake bindings must export the allocator-specific address getters
+        used below. HugeTLB allocators return void* (*)(size_t, int32_t), and
+        their free callbacks return void (*)(void*).
         Allocation must round the mapping up to 2 MiB, bind before first touch,
         and register the full mapping with SPDK before returning. Free must
         unregister from SPDK before munmap using the recorded mapping length.
@@ -170,11 +174,19 @@ def create_mooncake_pinned_alloc_free(
     """
     if size <= 0:
         raise ValueError("Arena size must be positive")
-    if allocator not in ("mooncake", "mooncake_mmap_huge2m"):
+    if allocator not in (
+        "mooncake",
+        "mooncake_mmap_huge2m",
+        "mooncake_mmap_huge2m_numa",
+    ):
         raise ValueError("Unsupported Mooncake allocator: " + allocator)
     if numa_node < -1 or numa_node > 2**31 - 1:
         raise ValueError("numa_node must be -1 or a non-negative int32")
-    external_hugepages = allocator == "mooncake_mmap_huge2m"
+    external_hugepages = allocator in (
+        "mooncake_mmap_huge2m",
+        "mooncake_mmap_huge2m_numa",
+    )
+    segmented_numa = allocator == "mooncake_mmap_huge2m_numa"
     try:
         # Third Party
         import mooncake.store as store
@@ -184,14 +196,15 @@ def create_mooncake_pinned_alloc_free(
             "get_alloc_func_addr/get_free_func_addr"
         ) from exc
 
-    alloc_name = (
-        "get_mmap_huge2m_alloc_func_addr"
-        if external_hugepages
-        else "get_alloc_func_addr"
-    )
-    free_name = (
-        "get_mmap_huge2m_free_func_addr" if external_hugepages else "get_free_func_addr"
-    )
+    if segmented_numa:
+        alloc_name = "get_mmap_huge2m_numa_alloc_func_addr"
+        free_name = "get_mmap_huge2m_numa_free_func_addr"
+    elif external_hugepages:
+        alloc_name = "get_mmap_huge2m_alloc_func_addr"
+        free_name = "get_mmap_huge2m_free_func_addr"
+    else:
+        alloc_name = "get_alloc_func_addr"
+        free_name = "get_free_func_addr"
     try:
         alloc_addr = int(getattr(store, alloc_name)())
         free_addr = int(getattr(store, free_name)())

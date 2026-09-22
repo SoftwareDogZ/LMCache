@@ -100,7 +100,10 @@ def test_nof_requires_mooncake_remote_backend() -> None:
 
 
 @pytest.mark.parametrize("enabled", [False, True])
-@pytest.mark.parametrize("allocator", ["mooncake", "mooncake_mmap_huge2m"])
+@pytest.mark.parametrize(
+    "allocator",
+    ["mooncake", "mooncake_mmap_huge2m", "mooncake_mmap_huge2m_numa"],
+)
 def test_explicit_mooncake_allocator(enabled: bool, allocator: str) -> None:
     """Explicit allocation is independent of NoF writes and survives validation."""
     config = _nof_config(

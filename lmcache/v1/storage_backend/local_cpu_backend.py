@@ -383,7 +383,10 @@ class LocalCPUBackend(AllocatorBackendInterface):
             )
 
         if config.uses_mooncake_local_cpu_allocator():
-            if config.local_cpu_allocator == "mooncake_mmap_huge2m":
+            if config.local_cpu_allocator in (
+                "mooncake_mmap_huge2m",
+                "mooncake_mmap_huge2m_numa",
+            ):
                 page_size = os.sysconf("SC_PAGESIZE")
                 cpu_size_bytes -= cpu_size_bytes % page_size
                 if cpu_size_bytes <= 0:
@@ -394,7 +397,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
                     numa_node = numa_mapping.gpu_to_numa_mapping.get(device_id, -1)
                 pinned_alloc_free = create_mooncake_pinned_alloc_free(
                     cpu_size_bytes,
-                    allocator="mooncake_mmap_huge2m",
+                    allocator=config.local_cpu_allocator,
                     numa_node=numa_node,
                 )
             else:

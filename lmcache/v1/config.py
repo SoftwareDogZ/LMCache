@@ -114,7 +114,10 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "type": str,
         "default": "default",
         "env_converter": str,
-        "description": "Local CPU allocator: default, mooncake, or mooncake_mmap_huge2m.",
+        "description": (
+            "Local CPU allocator: default, mooncake, mooncake_mmap_huge2m, "
+            "or mooncake_mmap_huge2m_numa."
+        ),
     },
     "enable_mooncake_nof_pool": {
         "type": bool,
@@ -654,7 +657,12 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
 def _uses_mooncake_local_cpu_allocator(self: Any) -> bool:
     """Return whether explicit allocation or NoF requires a Mooncake arena."""
     return (
-        self.local_cpu_allocator in ("mooncake", "mooncake_mmap_huge2m")
+        self.local_cpu_allocator
+        in (
+            "mooncake",
+            "mooncake_mmap_huge2m",
+            "mooncake_mmap_huge2m_numa",
+        )
         or self.enable_mooncake_nof_pool
     )
 
@@ -662,7 +670,12 @@ def _uses_mooncake_local_cpu_allocator(self: Any) -> bool:
 def _validate_config(self):
     """Validate configuration"""
 
-    if self.local_cpu_allocator not in ("default", "mooncake", "mooncake_mmap_huge2m"):
+    if self.local_cpu_allocator not in (
+        "default",
+        "mooncake",
+        "mooncake_mmap_huge2m",
+        "mooncake_mmap_huge2m_numa",
+    ):
         raise ValueError("Unsupported local_cpu_allocator: " + self.local_cpu_allocator)
 
     if not isinstance(self.mooncake_nof_replica_num, int) or isinstance(

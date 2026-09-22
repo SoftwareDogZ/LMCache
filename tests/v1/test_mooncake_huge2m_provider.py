@@ -77,6 +77,38 @@ def test_external_allocation_lifecycle(runtime: tuple, node: int) -> None:
     ]
 
 
+@pytest.mark.parametrize("node", [-1, 0, 3])
+def test_segmented_numa_allocation_lifecycle(runtime: tuple, node: int) -> None:
+    """The segmented mode selects its own Mooncake callbacks and forwards preference."""
+    store, calls = runtime
+    address = 2 * 1024 * 1024
+    alloc = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int32)(
+        lambda size, numa: calls.append(("numa_alloc", size, numa)) or address
+    )
+    free = ctypes.CFUNCTYPE(None, ctypes.c_void_p)(
+        lambda ptr: calls.append(("numa_free", ptr))
+    )
+    store.get_mmap_huge2m_numa_alloc_func_addr = lambda: ctypes.cast(
+        alloc, ctypes.c_void_p
+    ).value
+    store.get_mmap_huge2m_numa_free_func_addr = lambda: ctypes.cast(
+        free, ctypes.c_void_p
+    ).value
+
+    callbacks = create_mooncake_pinned_alloc_free(
+        4096, "mooncake_mmap_huge2m_numa", node
+    )
+    ptr = callbacks.alloc_fn(4096)
+    callbacks.free_fn(ptr)
+
+    assert calls == [
+        ("numa_alloc", 4096, node),
+        ("register", address, 4096),
+        ("unregister", address),
+        ("numa_free", address),
+    ]
+
+
 def test_misaligned_allocation_is_released(runtime: tuple) -> None:
     """An invalid Mooncake pointer is freed without accelerator registration."""
     store, calls = runtime
